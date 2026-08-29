@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "PII Redaction — Phase 0 Prototype",
+  "version": "0.1.0",
+  "description": "Architecture validation only: fetch interception, request tampering survival, response tee(), MutationObserver fallback. Not a working redaction tool yet.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/inject.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/content-bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
