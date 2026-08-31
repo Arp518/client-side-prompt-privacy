@@ -30,7 +30,7 @@
       "js": [
         "src/content-bridge.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_idle"
     }
   ]
 }
