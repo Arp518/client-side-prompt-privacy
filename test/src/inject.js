@@ -1,6 +1,16 @@
 /**
  * PHASE 0 — MAIN WORLD INTERCEPTOR
  * ---------------------------------
+ * STATUS: Phase 0 validated (2026-08-31 / 2026-09-01) against live
+ * chatgpt.com. All four risks confirmed with real evidence:
+ *   1. Plaintext request body IS visible before it leaves the browser.
+ *   2. A MUTATED body IS accepted by ChatGPT (200 OK, coherent reply
+ *      referencing the injected placeholders verbatim).
+ *   3. tee() on the streamed response does NOT break ChatGPT's own
+ *      rendering — normal replies kept streaming in throughout testing.
+ *   4. DOM fallback (content-bridge.js) independently confirms role
+ *      via [data-message-author-role] + .closest().
+ *
  * This script runs inside ChatGPT's own JS context (not the extension's
  * sandboxed "isolated world"). That's the only way to see and modify the
  * arguments to window.fetch before ChatGPT's own code calls it.
@@ -10,28 +20,29 @@
  * window.postMessage, which content-bridge.js picks up and can log to
  * chrome.storage / the extension's own console context.
  *
- * Four things this file proves or disproves:
- *   1. Can we see the plaintext body of the message-send request?
- *   2. Can we MODIFY that body and have ChatGPT still accept it?
- *   3. Can we tee() the streamed response without breaking ChatGPT's own
- *      rendering?
- *   4. (see content-bridge.js) DOM-level fallback if 1-3 don't hold up.
+ * NEXT: the EMAIL_RE toy detector below proved the substitution
+ * mechanism end-to-end and its job is done. Phase 1 replaces it with the
+ * real detection engine (regex tiers + compromise.js NER, built and
+ * tested standalone in detection/) bundled in here.
  */
 
 (function () {
   const LOG_PREFIX = "[PII-REDACT PHASE0]";
 
   // --- CONFIG -----------------------------------------------------------
-  // ChatGPT's send-message endpoint has moved before (chat.openai.com ->
-  // chatgpt.com, /backend-api/conversation, etc). If nothing logs when you
-  // send a message, open DevTools > Network, send a message, find the
-  // POST request that fires when you hit Enter, and add a matching
-  // substring here.
+  // Confirmed via live testing: the message-send endpoint is exactly
+  // /backend-api/f/conversation. Narrowed from the earlier broad
+  // "conversation" substring match, which was also catching
+  // /conversation/prepare, /conversation/experimental/generate_autocompletions,
+  // /conversations?..., and /conversation/<id>/stream_status — none of
+  // which carry the user's message text, so they only added log noise and
+  // wasted mutateBodyText() calls that always ended in no-text-parts-found.
+  //
+  // If ChatGPT changes this endpoint again, re-run the Phase 0 Network-tab
+  // check (send a message, watch for the real POST) before re-widening
+  // this — don't just guess a new substring.
   const ENDPOINT_MATCHERS = [
-    "/backend-api/conversation",
     "/backend-api/f/conversation",
-    "conversation" // deliberately broad fallback — narrow this once you've
-    // confirmed the real endpoint, or you'll match noise
   ];
 
   // Flip to false to leave requests untouched and only observe (useful if
@@ -39,8 +50,9 @@
   const MUTATE_BODY = true;
 
   // Toy detector — real detection engine (regex + compromise.js) comes in
-  // Phase 2. This is only here to prove the substitution mechanism works
-  // end-to-end.
+  // Phase 1. This is only here to prove the substitution mechanism works
+  // end-to-end, which it has: verified live, ChatGPT echoed
+  // [EMAIL_PLACEHOLDER_1]/[EMAIL_PLACEHOLDER_2] back verbatim in its reply.
   const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
   function relay(kind, payload) {
@@ -60,9 +72,10 @@
   }
 
   // Walk ChatGPT's message payload shape looking for the actual prompt
-  // text. Their request body has historically nested it under
-  // messages[].content.parts[]. If this comes back empty, log the raw
-  // parsed body (done below) and adjust this walk to match reality.
+  // text. Confirmed live: messages[].content.parts[] holds the user's
+  // typed text as a plain string. If ChatGPT changes this shape in the
+  // future, log the raw parsed body (done below via 'raw-body-captured')
+  // and adjust this walk to match.
   function findTextParts(parsedBody) {
     const hits = [];
     try {
