@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PII Redaction — Phase 0 Prototype",
   "version": "0.1.0",
-  "description": "Architecture validation only: fetch interception, request tampering survival, response tee(), MutationObserver fallback. Not a working redaction tool yet.",
+  "description": "Client-side PII detection and tokenization for ChatGPT prompts. Regex-based detector (email, phone, SSN, credit card, IP, DOB, street address) replaces PII with reversible placeholders before requests leave the browser.",
   "permissions": [
     "storage"
   ],
@@ -17,7 +17,7 @@
         "https://chat.openai.com/*"
       ],
       "js": [
-        "src/inject.js"
+        "dist/inject.bundle.js"
       ],
       "world": "MAIN",
       "run_at": "document_start"

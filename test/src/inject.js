@@ -20,14 +20,27 @@
  * window.postMessage, which content-bridge.js picks up and can log to
  * chrome.storage / the extension's own console context.
  *
- * NEXT: the EMAIL_RE toy detector below proved the substitution
- * mechanism end-to-end and its job is done. Phase 1 replaces it with the
- * real detection engine (regex tiers + compromise.js NER, built and
- * tested standalone in detection/) bundled in here.
+ * PHASE 1: the EMAIL_RE toy detector proved the substitution mechanism
+ * end-to-end and its job is done. It has now been replaced with the real
+ * detection + tokenization engine (detector.js + tokenizer.js), bundled
+ * into this file via esbuild.
  */
 
 (function () {
   const LOG_PREFIX = "[PII-REDACT PHASE0]";
+
+  // --- REAL DETECTION / TOKENIZATION ENGINE ------------------------------
+  // Bundled in by esbuild from src/tokenizer.js (which itself requires
+  // src/detector.js). Do NOT call detector.js directly here — always go
+  // through tokenize() so span-to-placeholder numbering stays consistent
+  // with what tokenizer.js's own smoke tests validated.
+  const { tokenize } = require('./tokenizer');
+
+  // In-memory map for this page session only. NEVER attach this object to
+  // `parsed` before JSON.stringify — that would leak originals into the
+  // outgoing request. It only ever gets read locally, or (Phase 1.5) relayed
+  // to content-bridge.js via postMessage for chrome.storage.session.
+  const sessionMap = {};
 
   // --- CONFIG -----------------------------------------------------------
   // Confirmed via live testing: the message-send endpoint is exactly
@@ -48,12 +61,6 @@
   // Flip to false to leave requests untouched and only observe (useful if
   // you want to isolate "can we see it" from "can we survive mutating it").
   const MUTATE_BODY = true;
-
-  // Toy detector — real detection engine (regex + compromise.js) comes in
-  // Phase 1. This is only here to prove the substitution mechanism works
-  // end-to-end, which it has: verified live, ChatGPT echoed
-  // [EMAIL_PLACEHOLDER_1]/[EMAIL_PLACEHOLDER_2] back verbatim in its reply.
-  const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
   function relay(kind, payload) {
     window.postMessage(
@@ -114,26 +121,36 @@
       return { mutated: false, bodyText: rawBodyText };
     }
 
+    // --- REAL DETECTION + TOKENIZATION ------------------------------------
+    // For each text part found in the payload, run it through the real
+    // detector/tokenizer. `parsed` only ever receives `tokenizedText` — the
+    // original values are kept solely in `sessionMap`, which is never
+    // merged back into `parsed` and never touches JSON.stringify below.
     let replacedAny = false;
-    let counter = 0;
+    let totalReplacements = 0;
+
     for (const hit of hits) {
       const original = hit.arr[hit.key];
-      const replaced = original.replace(EMAIL_RE, () => {
-        counter += 1;
+      const { tokenizedText, map } = tokenize(original);
+
+      const mapEntries = Object.keys(map);
+      if (mapEntries.length > 0) {
         replacedAny = true;
-        return `[EMAIL_PLACEHOLDER_${counter}]`;
-      });
-      hit.arr[hit.key] = replaced;
+        totalReplacements += mapEntries.length;
+        Object.assign(sessionMap, map); // keep originals locally only
+      }
+
+      hit.arr[hit.key] = tokenizedText; // only the tokenized text goes into parsed
     }
 
     if (!replacedAny) {
-      relay("no-pii-matched", { note: "No email-shaped text found in this prompt — try including one to test mutation." });
+      relay("no-pii-matched", { note: "No PII detected in this prompt by detector.js — try including an email, phone, SSN, card number, IP, DOB, or street address to test mutation." });
       return { mutated: false, bodyText: rawBodyText };
     }
 
     const newBodyText = JSON.stringify(parsed);
     relay("body-mutated", {           // <-- TEST 2: proof we changed it
-      replacements: counter,
+      replacements: totalReplacements,
       before: rawBodyText.slice(0, 300),
       after: newBodyText.slice(0, 300),
     });
