@@ -20,27 +20,45 @@
  * window.postMessage, which content-bridge.js picks up and can log to
  * chrome.storage / the extension's own console context.
  *
- * PHASE 1: the EMAIL_RE toy detector proved the substitution mechanism
+ * STAGE 1: the EMAIL_RE toy detector proved the substitution mechanism
  * end-to-end and its job is done. It has now been replaced with the real
  * detection + tokenization engine (detector.js + tokenizer.js), bundled
- * into this file via esbuild.
+ * into this file via esbuild (`npm run build`).
+ *
+ * STAGE 2 (current): log hygiene. Nothing relayed across the postMessage
+ * bridge may contain raw PII. This script runs in the page's own JS realm,
+ * so anything posted here is readable by any script on the page —
+ * including ChatGPT's own. Relay counts, types and shapes; never values.
  */
 
 (function () {
   const LOG_PREFIX = "[PII-REDACT PHASE0]";
+
+  // Escape hatch for debugging payload-shape drift. MUST be false in every
+  // committed build: when true, full request bodies (with real PII) are
+  // posted to the page and persisted to chrome.storage.local.
+  const DEBUG_DUMP_RAW = false;
 
   // --- REAL DETECTION / TOKENIZATION ENGINE ------------------------------
   // Bundled in by esbuild from src/tokenizer.js (which itself requires
   // src/detector.js). Do NOT call detector.js directly here — always go
   // through tokenize() so span-to-placeholder numbering stays consistent
   // with what tokenizer.js's own smoke tests validated.
-  const { tokenize } = require('./tokenizer');
+  const { createTokenSession } = require('./tokenizer');
 
-  // In-memory map for this page session only. NEVER attach this object to
-  // `parsed` before JSON.stringify — that would leak originals into the
-  // outgoing request. It only ever gets read locally, or (Phase 1.5) relayed
-  // to content-bridge.js via postMessage for chrome.storage.session.
-  const sessionMap = {};
+  // One tokenizer for the lifetime of this page's MAIN world, so placeholder
+  // numbering is monotonic across turns and a repeated value keeps its token.
+  //
+  // This replaces a plain object that was merged with Object.assign() after
+  // each per-call tokenize(). Because the stateless tokenizer restarts its
+  // counters every call, turn 2's [EMAIL_PLACEHOLDER_1] overwrote turn 1's,
+  // and turn 1 then restored to the wrong person's address (defect D1).
+  //
+  // The real values live only in this closure. They are never attached to
+  // `parsed` before JSON.stringify, and never relayed across the bridge —
+  // this script shares a JS realm with the page, so anything posted is
+  // readable by the page itself.
+  const tokenSession = createTokenSession();
 
   // --- CONFIG -----------------------------------------------------------
   // Confirmed via live testing: the message-send endpoint is exactly
@@ -63,9 +81,13 @@
   const MUTATE_BODY = true;
 
   function relay(kind, payload) {
+    // targetOrigin is scoped to this origin rather than "*". This does NOT
+    // hide the message from same-origin page scripts (nothing can, from the
+    // MAIN world) — it only stops the payload leaking to a cross-origin
+    // opener/embedder. The real defence is not putting PII in `payload`.
     window.postMessage(
       { source: "pii-redact-phase0", kind, payload, ts: Date.now() },
-      "*"
+      window.location.origin
     );
   }
 
@@ -88,6 +110,10 @@
     try {
       const messages = parsedBody?.messages || [];
       for (const m of messages) {
+        // Only the user's own message is ours to rewrite. Regenerate/edit
+        // payloads can carry assistant or system turns in the same array;
+        // tokenizing those would corrupt conversation history.
+        if (m?.author?.role !== "user") continue;
         const parts = m?.content?.parts;
         if (Array.isArray(parts)) {
           parts.forEach((p, i) => {
@@ -111,12 +137,26 @@
       return { mutated: false, bodyText: rawBodyText };
     }
 
-    relay("raw-body-captured", { parsed }); // <-- TEST 1: can we see plaintext?
+    // TEST 1 (can we see the plaintext body pre-send?) was answered in
+    // Stage 0. Relaying the answer is what leaked it: `parsed` is the whole
+    // untokenized request. Relay only its SHAPE — enough to diagnose payload
+    // drift, zero PII.
+    relay("body-shape-captured", {
+      keys: Object.keys(parsed || {}),
+      messageCount: Array.isArray(parsed?.messages) ? parsed.messages.length : 0,
+      roles: (parsed?.messages || []).map((m) => m?.author?.role ?? null),
+      partLengths: (parsed?.messages || []).flatMap((m) =>
+        Array.isArray(m?.content?.parts)
+          ? m.content.parts.map((p) => (typeof p === "string" ? p.length : -1))
+          : []
+      ),
+    });
+    if (DEBUG_DUMP_RAW) relay("raw-body-captured-DEBUG", { parsed });
 
     const hits = findTextParts(parsed);
     if (hits.length === 0) {
       relay("no-text-parts-found", {
-        note: "Payload shape didn't match messages[].content.parts[]. Inspect 'raw-body-captured' and update findTextParts().",
+        note: "Payload shape didn't match a user message at messages[].content.parts[]. Inspect 'body-shape-captured', or set DEBUG_DUMP_RAW=true locally, then update findTextParts().",
       });
       return { mutated: false, bodyText: rawBodyText };
     }
@@ -128,16 +168,20 @@
     // merged back into `parsed` and never touches JSON.stringify below.
     let replacedAny = false;
     let totalReplacements = 0;
+    const typesFound = {};
 
     for (const hit of hits) {
       const original = hit.arr[hit.key];
-      const { tokenizedText, map } = tokenize(original);
+      // The session owns the map — no Object.assign merge, which is what
+      // made turns overwrite each other. `map` here is only the tokens
+      // newly minted by this call; a value seen in an earlier turn reuses
+      // its existing token and contributes nothing new.
+      const { tokenizedText, spans } = tokenSession.tokenize(original);
 
-      const mapEntries = Object.keys(map);
-      if (mapEntries.length > 0) {
+      if (spans.length > 0) {
         replacedAny = true;
-        totalReplacements += mapEntries.length;
-        Object.assign(sessionMap, map); // keep originals locally only
+        totalReplacements += spans.length;
+        for (const s of spans) typesFound[s.type] = (typesFound[s.type] || 0) + 1;
       }
 
       hit.arr[hit.key] = tokenizedText; // only the tokenized text goes into parsed
@@ -149,11 +193,22 @@
     }
 
     const newBodyText = JSON.stringify(parsed);
-    relay("body-mutated", {           // <-- TEST 2: proof we changed it
+    // TEST 2 proof, without the leak: `before` was the raw prompt and `after`
+    // often still contained untokenized context. Counts and types only. The
+    // authoritative proof that mutation worked is the Network tab payload,
+    // not this log line.
+    relay("body-mutated", {
       replacements: totalReplacements,
-      before: rawBodyText.slice(0, 300),
-      after: newBodyText.slice(0, 300),
+      typesFound,
+      bytesBefore: rawBodyText.length,
+      bytesAfter: newBodyText.length,
     });
+    if (DEBUG_DUMP_RAW) {
+      relay("body-mutated-DEBUG", {
+        before: rawBodyText.slice(0, 300),
+        after: newBodyText.slice(0, 300),
+      });
+    }
     return { mutated: true, bodyText: newBodyText };
   }
 
@@ -187,6 +242,12 @@
         const { mutated, bodyText } = mutateBodyText(rawBodyText);
         if (mutated) {
           if (input instanceof Request) {
+            // Every field here must be carried over explicitly — anything
+            // omitted silently reverts to a default on the rebuilt Request.
+            // `signal` is the one that matters most: drop it and ChatGPT's
+            // "stop generating" button becomes a no-op on any request we
+            // tampered with, because the AbortSignal is attached to the
+            // Request rather than to init.
             finalInput = new Request(input.url, {
               method: input.method,
               headers: input.headers,
@@ -196,6 +257,10 @@
               cache: input.cache,
               redirect: input.redirect,
               referrer: input.referrer,
+              referrerPolicy: input.referrerPolicy,
+              integrity: input.integrity,
+              keepalive: input.keepalive,
+              signal: input.signal,
             });
           } else {
             finalInit = Object.assign({}, init, { body: bodyText });

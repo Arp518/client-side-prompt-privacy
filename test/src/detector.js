@@ -44,6 +44,92 @@ function detectSSN(text) {
   return matchAll(text, re, 'SSN');
 }
 
+// Digit counts real payment cards actually use, in rough order of how
+// common they are: Visa/MC/Discover 16, Amex 15, UnionPay 19, Diners 14,
+// legacy Visa 13. Deliberately excludes 17 and 18 — no major scheme issues
+// those, and allowing them roughly doubles the chance of a spurious Luhn
+// hit when carving a card out of a longer digit run.
+const CARD_LENGTHS = [16, 15, 19, 14, 13];
+
+/**
+ * Issuer prefix (IIN/BIN) paired with the lengths that issuer actually uses.
+ *
+ * Luhn alone is a weak filter — it passes roughly one in ten random digit
+ * strings — and the windowed retry below multiplies that risk by trying
+ * several substrings per run. Requiring the window to look like a real
+ * card from an actual scheme cuts that noise sharply for one cheap test:
+ * "1234567890123456" contains the Luhn-valid window "34567890123456",
+ * which starts 34 (Amex) but is 14 digits, and Amex is always 15.
+ */
+const CARD_SCHEMES = [
+  { re: /^4/, lengths: [13, 16, 19] },                        // Visa
+  { re: /^5[1-5]/, lengths: [16] },                           // Mastercard
+  { re: /^2(2[2-9]\d|[3-6]\d\d|7[01]\d|720)/, lengths: [16] },// Mastercard 2-series
+  { re: /^3[47]/, lengths: [15] },                            // Amex
+  { re: /^(6011|65|64[4-9])/, lengths: [16, 19] },            // Discover
+  { re: /^35(2[89]|[3-8]\d)/, lengths: [16, 17, 18, 19] },    // JCB
+  { re: /^3(0[0-5]|095|6|8|9)/, lengths: [14, 16, 19] },      // Diners
+  { re: /^62/, lengths: [16, 17, 18, 19] },                   // UnionPay
+];
+
+function isPlausibleCard(digits) {
+  return CARD_SCHEMES.some(
+    (s) => s.re.test(digits) && s.lengths.includes(digits.length)
+  );
+}
+
+/**
+ * Pull a Luhn-valid card out of a digit run, tolerating junk digits glued
+ * to either end.
+ *
+ * The greedy match is deliberately wide, so a card adjacent to unrelated
+ * digits comes back with those digits attached ("id 99 4111111111111111"
+ * matches all 18 digits). Luhn then fails on the combined run. Filtering
+ * the match away at that point — which is what this used to do — silently
+ * dropped a real, valid card and let it leave the browser unmasked
+ * (defect D11). So on failure, retry over plausible card-length windows
+ * instead of giving up.
+ *
+ * @returns {{start:number,end:number,type:string,value:string}|null}
+ */
+function extractLuhnCard(raw, baseOffset) {
+  const digitPos = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] >= '0' && raw[i] <= '9') digitPos.push(i);
+  }
+  const digits = digitPos.map((i) => raw[i]).join('');
+
+  // Fast path: the whole run is the card. Overwhelmingly the common case.
+  if (luhnCheck(digits) && isPlausibleCard(digits)) {
+    return {
+      start: baseOffset,
+      end: baseOffset + raw.length,
+      type: 'CREDIT_CARD',
+      value: raw,
+    };
+  }
+
+  // Otherwise carve out the leftmost window of a real card length that
+  // passes Luhn, trying likelier lengths first.
+  for (const len of CARD_LENGTHS) {
+    if (len > digits.length) continue;
+    for (let s = 0; s + len <= digits.length; s++) {
+      const cand = digits.slice(s, s + len);
+      if (!luhnCheck(cand) || !isPlausibleCard(cand)) continue;
+      const startIdx = digitPos[s];
+      const endIdx = digitPos[s + len - 1] + 1;
+      return {
+        start: baseOffset + startIdx,
+        end: baseOffset + endIdx,
+        type: 'CREDIT_CARD',
+        value: raw.slice(startIdx, endIdx),
+      };
+    }
+  }
+
+  return null;
+}
+
 function detectCreditCard(text) {
   // 13-19 digits, optionally grouped by spaces or dashes into 4s (covers
   // Visa/MC/Amex/Discover layouts). Validated with a Luhn check to cut
@@ -53,8 +139,14 @@ function detectCreditCard(text) {
   // "4111 1111 1111 1111 expires" would match through the space before
   // "expires") — require the match to end on a digit to prevent that.
   const re = /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/g;
-  const raw = matchAll(text, re, 'CREDIT_CARD');
-  return raw.filter((span) => luhnCheck(span.value.replace(/[ -]/g, '')));
+  const spans = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const card = extractLuhnCard(m[0], m.index);
+    if (card) spans.push(card);
+    if (m.index === re.lastIndex) re.lastIndex++; // guard against zero-width loops
+  }
+  return spans;
 }
 
 function detectIPv4(text) {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "PII Redaction — Phase 0 Prototype",
-  "version": "0.1.0",
+  "name": "PII Redaction — Research Prototype",
+  "version": "0.3.0",
   "description": "Client-side PII detection and tokenization for ChatGPT prompts. Regex-based detector (email, phone, SSN, credit card, IP, DOB, street address) replaces PII with reversible placeholders before requests leave the browser.",
   "permissions": [
     "storage"
@@ -30,7 +30,7 @@
       "js": [
         "src/content-bridge.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ]
 }
