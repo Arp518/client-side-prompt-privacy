@@ -1,0 +1,220 @@
+{
+  "generated": "2026-09-13",
+  "prompts": 130,
+  "exact": {
+    "overall": {
+      "tp": 73,
+      "fp": 21,
+      "fn": 6,
+      "precision": 0.776595744680851,
+      "recall": 0.9240506329113924,
+      "f1": 0.8439306358381502
+    },
+    "perType": {
+      "EMAIL": {
+        "tp": 23,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "PHONE": {
+        "tp": 12,
+        "fp": 8,
+        "fn": 0,
+        "precision": 0.6,
+        "recall": 1,
+        "f1": 0.7499999999999999
+      },
+      "SSN": {
+        "tp": 4,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.8,
+        "recall": 1,
+        "f1": 0.888888888888889
+      },
+      "CREDIT_CARD": {
+        "tp": 9,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.9,
+        "recall": 1,
+        "f1": 0.9473684210526316
+      },
+      "IPV4": {
+        "tp": 11,
+        "fp": 5,
+        "fn": 0,
+        "precision": 0.6875,
+        "recall": 1,
+        "f1": 0.8148148148148148
+      },
+      "IPV6": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "DOB": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "STREET_ADDRESS": {
+        "tp": 5,
+        "fp": 6,
+        "fn": 6,
+        "precision": 0.45454545454545453,
+        "recall": 0.45454545454545453,
+        "f1": 0.45454545454545453
+      },
+      "SECRET": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 8,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      },
+      "PERSON": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 4,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      },
+      "ORG": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 5,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      },
+      "LOCATION": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 3,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      }
+    }
+  },
+  "overlap": {
+    "overall": {
+      "tp": 79,
+      "fp": 15,
+      "fn": 0,
+      "precision": 0.8404255319148937,
+      "recall": 1,
+      "f1": 0.9132947976878613
+    },
+    "perType": {
+      "EMAIL": {
+        "tp": 23,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "PHONE": {
+        "tp": 12,
+        "fp": 8,
+        "fn": 0,
+        "precision": 0.6,
+        "recall": 1,
+        "f1": 0.7499999999999999
+      },
+      "SSN": {
+        "tp": 4,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.8,
+        "recall": 1,
+        "f1": 0.888888888888889
+      },
+      "CREDIT_CARD": {
+        "tp": 9,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.9,
+        "recall": 1,
+        "f1": 0.9473684210526316
+      },
+      "IPV4": {
+        "tp": 11,
+        "fp": 5,
+        "fn": 0,
+        "precision": 0.6875,
+        "recall": 1,
+        "f1": 0.8148148148148148
+      },
+      "IPV6": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "DOB": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "STREET_ADDRESS": {
+        "tp": 11,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "SECRET": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 8,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      },
+      "PERSON": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 4,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      },
+      "ORG": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 5,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      },
+      "LOCATION": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 3,
+        "precision": null,
+        "recall": 0,
+        "f1": null
+      }
+    }
+  }
+}
