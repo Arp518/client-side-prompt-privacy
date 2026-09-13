@@ -151,3 +151,53 @@ a final full-message frame); and one capture each of an aborted stream and
 an error response.
 
 Store raw captures under `test/research/captures/` with the date and build.
+
+---
+
+## Stage 5 — Private channel and session storage
+
+### F-007 · Real values leave the page-readable channel
+
+Date tested: 2026-09-13
+Chrome version: n/a (Node sandbox)
+Observed behavior: `content-bridge.js` creates a `MessageChannel` at
+`document_start` and transfers one port into the MAIN world via a single
+`postMessage` carrying no data. Token->value deltas then flow over that
+port. `window.postMessage` continues to carry only counts, types and
+shapes. A service worker (`src/sw.js`) performs the actual
+`chrome.storage.session` writes, keyed `map:<tabId>`.
+Evidence: `npm run test:vault` — 20 checks. Deliberately reintroducing a
+`relay()` fallback for deltas fails 2 of them, so the guard is load-bearing.
+Assumption made: content scripts at `document_start` run before any page
+script, so our handshake wins the race against a hostile listener.
+**This is the residual risk and it is not eliminated.** MAIN world *is* the
+page's JS realm; a page script that installed a `message` listener before
+our content scripts ran could intercept the port offer. The port is handed
+out exactly once (verified), which bounds the exposure to a single window at
+page load rather than a continuous broadcast on every turn — but "wins in
+practice" is the strongest claim MV3 supports. Document it; do not imply
+otherwise in any UI copy.
+Implementation consequence: D3 and D10 closed. Per-tab isolation is now
+explicit rather than incidental — previously nothing was shared, so nothing
+could cross tabs; the moment storage exists, tab-keying is mandatory.
+Confidence: observed directly (Node sandbox); the handshake ordering claim
+is inferred from documented content-script semantics and needs one live
+confirmation.
+Stability: documented browser API
+
+### F-008 · chrome.storage.session requires a service worker
+
+Date tested: 2026-09-13
+Observed behavior: MV3 defaults `chrome.storage.session` to
+`TRUSTED_CONTEXTS`; a content script is not one. `setAccessLevel()` is only
+callable from a trusted context, and the manifest had no background worker,
+so the originally planned "bridge writes session storage directly" design
+could not have worked at all.
+Implementation consequence: added `background.service_worker`. Chose to
+route writes through the worker rather than widen access with
+`setAccessLevel(TRUSTED_AND_UNTRUSTED_CONTEXTS)` — widening would open
+session storage to every content script on the page, and routing gives
+`sender.tab.id` for free, which is exactly what per-tab keying needs.
+Confidence: inferred from MV3 documentation; the failure mode was never
+observed live because the code was never written that way.
+Stability: documented browser API

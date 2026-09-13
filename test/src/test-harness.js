@@ -73,13 +73,34 @@ function buildSandbox(opts) {
     });
   }
 
+  // Real listener dispatch, so the MAIN-world port handshake can be
+  // exercised. postMessage records everything (that array IS the
+  // page-observable surface the leak test inspects) and also delivers to
+  // registered listeners with `ports` populated from the transfer list.
+  const listeners = { message: [] };
+
   const win = {
     fetch: originalFetch,
     location: { href: `${origin}/`, origin },
-    postMessage(msg /*, targetOrigin */) {
+    postMessage(msg, _targetOrigin, transfer) {
       relayed.push(msg);
+      const event = {
+        data: msg,
+        origin,
+        source: win,
+        ports: transfer || [],
+      };
+      for (const fn of [...listeners.message]) fn(event);
     },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      if (!listeners[type]) listeners[type] = [];
+      listeners[type].push(fn);
+    },
+    removeEventListener(type, fn) {
+      if (!listeners[type]) return;
+      const i = listeners[type].indexOf(fn);
+      if (i !== -1) listeners[type].splice(i, 1);
+    },
   };
 
   const sandbox = {
@@ -103,6 +124,7 @@ function buildSandbox(opts) {
   return {
     sandbox,
     win,
+    listeners,
     relayed,
     sentBodies,
     requestedUrls,
@@ -193,8 +215,127 @@ function appearsIn(haystack, value) {
   return escaped !== value && haystack.includes(escaped);
 }
 
+/**
+ * A linked pair of MessagePort-alikes.
+ *
+ * Deliberately not Node's real MessageChannel: those are worker_threads
+ * ports whose lifecycle keeps the event loop alive and whose delivery is
+ * async, both of which make tests flaky for no benefit. Transfer semantics
+ * are a browser guarantee; what needs testing is our own handshake and
+ * message handling.
+ */
+function makePortPair() {
+  const a = { onmessage: null, _peer: null, postMessage: null, closed: false };
+  const b = { onmessage: null, _peer: null, postMessage: null, closed: false };
+
+  const send = (from) => (data) => {
+    if (from.closed) throw new Error('port closed');
+    const peer = from._peer;
+    if (peer && typeof peer.onmessage === 'function') {
+      peer.onmessage({ data });
+    }
+  };
+
+  a._peer = b;
+  b._peer = a;
+  a.postMessage = send(a);
+  b.postMessage = send(b);
+  a.close = () => { a.closed = true; };
+  b.close = () => { b.closed = true; };
+
+  return [a, b];
+}
+
+/**
+ * In-memory stand-in for the chrome.* surface sw.js and content-bridge.js
+ * use. Returns the fake plus the backing stores, so tests can assert on
+ * what was actually persisted and to which key.
+ */
+function fakeChrome() {
+  const session = {};
+  const local = {};
+  const listeners = { message: [], tabRemoved: [] };
+
+  const area = (store) => ({
+    async get(key) {
+      if (key === undefined || key === null) return { ...store };
+      if (typeof key === 'string') {
+        return Object.prototype.hasOwnProperty.call(store, key)
+          ? { [key]: store[key] }
+          : {};
+      }
+      const out = {};
+      for (const k of key) if (k in store) out[k] = store[k];
+      return out;
+    },
+    async set(obj) {
+      Object.assign(store, obj);
+    },
+    async remove(key) {
+      for (const k of Array.isArray(key) ? key : [key]) delete store[k];
+    },
+  });
+
+  const chrome = {
+    storage: { session: area(session), local: area(local) },
+    runtime: {
+      onMessage: {
+        addListener(fn) {
+          listeners.message.push(fn);
+        },
+      },
+      /** Route a message to the worker's listeners and resolve its reply. */
+      sendMessage(msg, sender) {
+        return new Promise((resolve) => {
+          const fullSender = sender || { tab: { id: 1 } };
+          let answered = false;
+          const respond = (r) => {
+            if (!answered) {
+              answered = true;
+              resolve(r);
+            }
+          };
+          for (const fn of listeners.message) fn(msg, fullSender, respond);
+        });
+      },
+    },
+    tabs: {
+      onRemoved: {
+        addListener(fn) {
+          listeners.tabRemoved.push(fn);
+        },
+      },
+    },
+  };
+
+  return {
+    chrome,
+    session,
+    local,
+    closeTab: (tabId) => {
+      for (const fn of listeners.tabRemoved) fn(tabId);
+    },
+  };
+}
+
+/** Load sw.js into a context wired to a fake chrome. */
+function loadServiceWorker(fake) {
+  const swPath = path.join(__dirname, 'sw.js');
+  const ctx = vm.createContext({
+    chrome: fake.chrome,
+    console: { log() {}, warn() {}, error() {} },
+    setTimeout,
+    clearTimeout,
+  });
+  vm.runInContext(fs.readFileSync(swPath, 'utf8'), ctx, { filename: 'src/sw.js' });
+  return ctx;
+}
+
 module.exports = {
   BUNDLE_PATH,
+  makePortPair,
+  fakeChrome,
+  loadServiceWorker,
   buildSandbox,
   loadBundle,
   userMessageBody,

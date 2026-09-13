@@ -95,6 +95,61 @@
   // you want to isolate "can we see it" from "can we survive mutating it").
   const MUTATE_BODY = true;
 
+  // --- PRIVATE CHANNEL TO THE ISOLATED WORLD ----------------------------
+  //
+  // relay() below goes over window.postMessage, which every script on the
+  // page can read. That is fine for counts and types, and deliberately all
+  // it ever carries. But the token map holds the real values, and those
+  // have to reach the isolated world somehow to be persisted.
+  //
+  // So: content-bridge.js creates a MessageChannel and transfers one port
+  // here in a single message carrying no data. Everything after that flows
+  // over the port, which page scripts cannot observe.
+  //
+  // Honest limitation, worth stating rather than hiding: this script shares
+  // a JS realm with the page, so a page script that installed a message
+  // listener before our content scripts ran could intercept the port
+  // handshake. Content scripts at document_start run before any page
+  // script, so in practice we win that race — but "in practice" is the
+  // strongest claim MV3 supports. There is no truly private MAIN-world
+  // channel. The mitigation that actually matters is the one below it:
+  // values are only sent at all because persistence needs them.
+  let vaultPort = null;
+  const pendingVaultDeltas = [];
+
+  function sendVaultDelta(delta) {
+    if (!delta || Object.keys(delta).length === 0) return;
+    if (vaultPort) {
+      try {
+        vaultPort.postMessage({ kind: "map-update", delta });
+        return;
+      } catch (e) {
+        relay("error", { where: "vault port post", message: String(e) });
+        vaultPort = null;
+      }
+    }
+    // Port not handed over yet (or it broke) — hold, bounded, and flush
+    // once it arrives. Never fall back to window.postMessage for these.
+    if (pendingVaultDeltas.length < 50) pendingVaultDeltas.push(delta);
+  }
+
+  window.addEventListener("message", function onHandshake(event) {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== "pii-redact-port-offer") return;
+    if (vaultPort) return; // accept exactly one port, first offer wins
+    const port = event.ports && event.ports[0];
+    if (!port) return;
+
+    vaultPort = port;
+    window.removeEventListener("message", onHandshake);
+
+    while (pendingVaultDeltas.length) {
+      sendVaultDelta(pendingVaultDeltas.shift());
+    }
+    relay("vault-channel-open", {});
+  });
+
   function relay(kind, payload) {
     // targetOrigin is scoped to this origin rather than "*". This does NOT
     // hide the message from same-origin page scripts (nothing can, from the
@@ -205,13 +260,17 @@
       // made turns overwrite each other. `map` here is only the tokens
       // newly minted by this call; a value seen in an earlier turn reuses
       // its existing token and contributes nothing new.
-      const { tokenizedText, spans } = tokenSession.tokenize(original);
+      const { tokenizedText, map, spans } = tokenSession.tokenize(original);
 
       if (spans.length > 0) {
         replacedAny = true;
         totalReplacements += spans.length;
         for (const s of spans) typesFound[s.type] = (typesFound[s.type] || 0) + 1;
       }
+
+      // Only the newly minted tokens, over the private port. A value seen
+      // in an earlier turn is already stored, so nothing is re-sent.
+      sendVaultDelta(map);
 
       hit.arr[hit.key] = tokenizedText; // only the tokenized text goes into parsed
     }

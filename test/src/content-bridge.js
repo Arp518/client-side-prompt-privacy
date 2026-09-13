@@ -124,6 +124,69 @@ window.addEventListener("pagehide", flushLog);
 
 
 /* ============================================================
+ * PRIVATE CHANNEL TO THE MAIN WORLD
+ *
+ * The window.postMessage bridge below is page-readable, so it only ever
+ * carries counts, types and shapes. Real token->value pairs need a
+ * channel the page cannot observe, so we create a MessageChannel and
+ * transfer one port into the MAIN world in a single message that carries
+ * no data of its own. Everything sensitive flows over the port.
+ *
+ * Handshake is two-way because content-script execution order between the
+ * MAIN and ISOLATED worlds at document_start is not guaranteed: we offer
+ * the port on load, and also re-offer when inject.js asks. Either ordering
+ * converges, and inject.js accepts only the first port it receives.
+ *
+ * Note the port is offered exactly once. See the matching comment in
+ * inject.js for the residual risk this does not eliminate.
+ * ========================================================== */
+
+let vaultPortOffered = false;
+
+function offerVaultPort() {
+  if (vaultPortOffered) return;
+  vaultPortOffered = true;
+
+  const channel = new MessageChannel();
+
+  channel.port1.onmessage = (event) => {
+    const msg = event.data;
+    if (!msg || msg.kind !== "map-update") return;
+    forwardToWorker({
+      source: "pii-redact",
+      kind: "map-update",
+      delta: msg.delta,
+    });
+  };
+
+  window.postMessage(
+    { source: "pii-redact-port-offer" },
+    window.location.origin,
+    [channel.port2]
+  );
+}
+
+function forwardToWorker(message) {
+  if (contextInvalidated) return;
+  try {
+    chrome.runtime.sendMessage(message).catch((e) => {
+      if (String(e).includes("Extension context invalidated")) {
+        contextInvalidated = true;
+        return;
+      }
+      console.warn(`${LOG_PREFIX} worker message failed`, e);
+    });
+  } catch (e) {
+    if (String(e).includes("Extension context invalidated")) {
+      contextInvalidated = true;
+      return;
+    }
+    console.warn(`${LOG_PREFIX} worker message threw`, e);
+  }
+}
+
+
+/* ============================================================
  * MAIN-WORLD → ISOLATED-WORLD BRIDGE
  * ========================================================== */
 
@@ -141,6 +204,11 @@ window.addEventListener("message", (event) => {
     msg.source !== "pii-redact-phase0"
   ) {
     return;
+  }
+
+  // inject.js loaded after us and missed the port offer -- re-offer.
+  if (msg.kind === "injector-ready" && !vaultPortOffered) {
+    offerVaultPort();
   }
 
   console.log(
@@ -709,6 +777,11 @@ function startDomFallbackObserver() {
 /* ============================================================
  * START
  * ========================================================== */
+
+// Offer the private port first, synchronously, before anything else runs.
+// This is at document_start, ahead of any page script, which is what makes
+// the handshake defensible.
+offerVaultPort();
 
 // This script now runs at document_start so it is listening before
 // inject.js posts `injector-ready` (previously it loaded at document_idle
