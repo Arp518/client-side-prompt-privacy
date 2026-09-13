@@ -20,6 +20,7 @@ const { detectPII } = require('../src/detector');
 
 /** Types detector.js can actually emit today. */
 const IMPLEMENTED = new Set([
+  'SECRET',
   'EMAIL',
   'PHONE',
   'SSN',
@@ -31,7 +32,7 @@ const IMPLEMENTED = new Set([
 ]);
 
 /** Labelled deliberately ahead of the code. Zero recall is expected. */
-const PLANNED = new Set(['SECRET', 'PERSON', 'ORG', 'LOCATION']);
+const PLANNED = new Set(['PERSON', 'ORG', 'LOCATION']);
 
 const errors = [];
 const warnings = [];
@@ -61,7 +62,7 @@ for (const item of prompts) {
     if (sliced !== span.value) {
       errors.push(
         `${where}: offset mismatch — text.slice(${span.start},${span.end}) is ` +
-          `${JSON.stringify(sliced)} but value is ${JSON.stringify(span.value)}`
+        `${JSON.stringify(sliced)} but value is ${JSON.stringify(span.value)}`
       );
     }
     if (!IMPLEMENTED.has(span.type) && !PLANNED.has(span.type)) {
@@ -104,7 +105,7 @@ const negativeShare = prompts.length ? withNegatives / prompts.length : 0;
 if (negativeShare < 0.25) {
   warnings.push(
     `only ${(negativeShare * 100).toFixed(0)}% of prompts carry a decoy — ` +
-      'precision will read higher than it deserves (target ~40%)'
+    'precision will read higher than it deserves (target ~40%)'
   );
 }
 for (const t of IMPLEMENTED) {

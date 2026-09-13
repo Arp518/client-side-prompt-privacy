@@ -108,7 +108,7 @@ async function main() {
       `not relayed: ${type}`,
       !appearsIn(relayedJson, value),
       `found ${JSON.stringify(value)} in a relayed payload — this would be ` +
-        'persisted to chrome.storage.local and is readable by the page'
+      'persisted to chrome.storage.local and is readable by the page'
     );
   }
   r.check(
@@ -134,7 +134,7 @@ async function main() {
     'body-mutated reports 7 replacements',
     mutated && mutated.payload && mutated.payload.replacements === 7,
     `got: ${mutated && mutated.payload && mutated.payload.replacements} ` +
-      `(types: ${JSON.stringify(mutated && mutated.payload && mutated.payload.typesFound)})`
+    `(types: ${JSON.stringify(mutated && mutated.payload && mutated.payload.typesFound)})`
   );
 
   r.group('multi-turn session (defect D1), through the real bundle');
@@ -163,7 +163,7 @@ async function main() {
   r.check(
     'no PII relayed on any turn',
     !Object.values(PII).some((v) => appearsIn(h.relayedJson(), v)) &&
-      !h.relayedJson().includes(SECOND_EMAIL),
+    !h.relayedJson().includes(SECOND_EMAIL),
     'a later turn relayed a raw value'
   );
 

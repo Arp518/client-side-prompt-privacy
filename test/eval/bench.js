@@ -65,7 +65,7 @@ function report(rows) {
   for (const r of rows) {
     console.log(
       `    ${r.label.padEnd(22)} ${String(r.runs).padStart(6)} ` +
-        `${ms(r.p50)} ${ms(r.p95)} ${ms(r.p99)} ${ms(r.max)} ${ms(r.perKB)}`
+      `${ms(r.p50)} ${ms(r.p95)} ${ms(r.p99)} ${ms(r.max)} ${ms(r.perKB)}`
     );
   }
 }
@@ -109,11 +109,11 @@ const doc = measure('pasted document', (t) => session.tokenize(t), pasted);
 console.log('\n  verdict');
 console.log(
   `    A typical prompt costs ${worst.p95.toFixed(2)} ms at p95 — imperceptible ` +
-    'against a network round trip.'
+  'against a network round trip.'
 );
 console.log(
   `    A pasted ${(pasted[0].length / 1024).toFixed(0)} KB document costs ` +
-    `${doc.p95.toFixed(1)} ms at p95` +
-    (doc.p95 > 50 ? ' — worth watching as detector types are added.' : '.')
+  `${doc.p95.toFixed(1)} ms at p95` +
+  (doc.p95 > 50 ? ' — worth watching as detector types are added.' : '.')
 );
 console.log('');

@@ -35,6 +35,7 @@ const { prompts } = require('./dataset');
 const { detectPII } = require('../src/detector');
 
 const IMPLEMENTED = [
+  'SECRET',
   'EMAIL',
   'PHONE',
   'SSN',
@@ -44,7 +45,7 @@ const IMPLEMENTED = [
   'DOB',
   'STREET_ADDRESS',
 ];
-const PLANNED = ['SECRET', 'PERSON', 'ORG', 'LOCATION'];
+const PLANNED = ['PERSON', 'ORG', 'LOCATION'];
 
 const BASELINE_PATH = path.join(__dirname, 'baseline.json');
 const FAILURES_PATH = path.join(__dirname, 'failures.json');
@@ -184,8 +185,8 @@ function printTable(title, rows) {
   for (const [type, s] of rows) {
     console.log(
       `    ${type.padEnd(16)}` +
-        `${String(s.tp).padStart(3)} ${String(s.fp).padStart(3)} ${String(s.fn).padStart(3)}   ` +
-        `${pct(s.precision)}    ${pct(s.recall)}   ${pct(s.f1)}`
+      `${String(s.tp).padStart(3)} ${String(s.fp).padStart(3)} ${String(s.fn).padStart(3)}   ` +
+      `${pct(s.precision)}    ${pct(s.recall)}   ${pct(s.f1)}`
     );
   }
 }
@@ -211,7 +212,7 @@ for (const r of [exactRun, overlapRun]) {
   const o = r.overall;
   console.log(
     `\n    OVERALL (implemented)  TP ${o.tp}  FP ${o.fp}  FN ${o.fn}   ` +
-      `P ${pct(o.precision)}  R ${pct(o.recall)}  F1 ${pct(o.f1)}`
+    `P ${pct(o.precision)}  R ${pct(o.recall)}  F1 ${pct(o.f1)}`
   );
 
   console.log('\n  by prompt bucket');

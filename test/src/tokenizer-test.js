@@ -222,6 +222,76 @@ group('D12 — detokenize() against real model formatting variants');
 }
 
 // ===========================================================================
+group('Phase 6 — detector fixes found by the eval harness');
+// ===========================================================================
+{
+  const of = (type) => (t) => detectPII(t).filter((s) => s.type === type).map((s) => s.value);
+  const addr = of('STREET_ADDRESS');
+  const card = of('CREDIT_CARD');
+  const phone = of('PHONE');
+  const ip = of('IPV4');
+  const secret = of('SECRET');
+
+  // The trailing \.? meant for "Baker St." also swallowed the period ending
+  // the sentence, so tokenizing left the model a sentence with no terminator.
+  assert('address stops before the sentence period', addr('I live at 742 Evergreen Terrace.'),
+    ['742 Evergreen Terrace']);
+  assert('address still found mid-sentence', addr('Ship it to 221 Baker Street, apt 4.'),
+    ['221 Baker Street']);
+
+  // The windowed retry carved a Luhn-valid 13-digit Visa out of a 15-digit
+  // IMEI. A real card shares a digit run as a WHOLE group, never as a cut
+  // through the middle of one.
+  assert('no card carved out of an IMEI', card('The IMEI is 490154203237518 here'), []);
+  assert('card still found beside junk digits', card('id 99 4111111111111111 done'),
+    ['4111111111111111']);
+  assert('card still found in spaced groups', card('card 4111 1111 1111 1111 expires'),
+    ['4111 1111 1111 1111']);
+
+  // Ten bare digits are shape-identical to an order or case id. Punctuated
+  // forms are taken on sight; bare runs need nearby wording that says phone.
+  assert('punctuated phone', phone('Call me on 555-123-4567.'), ['555-123-4567']);
+  assert('parenthesised phone', phone('My number is (555) 987-6543 after six.'), ['(555) 987-6543']);
+  // Bare ten-digit runs are matched unconditionally. Context gating was
+  // tried and reverted: a false negative is a leak, a false positive is an
+  // annoyance, and an Indian mobile is normally written bare with no cue.
+  assert('bare digits, no context needed', phone('no.9876543210'), ['9876543210']);
+  assert('bare digits mid-sentence', phone('my number is 9876543210'), ['9876543210']);
+  // The accepted cost of that choice — order numbers get masked too.
+  assert('order number also matches, by design',
+    phone('Order number 5551234567 has not shipped.'), ['5551234567']);
+
+  // A dotted quad is the same shape as a version string; only surrounding
+  // wording separates them.
+  assert('real IP detected', ip('The server is at 192.168.1.100.'), ['192.168.1.100']);
+  assert('version string ignored', ip('We are on version 1.2.3.4 of the client.'), []);
+  assert('upgrade context ignored', ip('Upgrade from 10.15.7.1 to the latest build.'), []);
+
+  // Credentials: prefix-anchored, no generic entropy rule.
+  const K = (...parts) => parts.join('');
+  assert('AWS key', secret(`key ${K('AKIA', 'IOSFODNN7', 'EXAMPLE')} here`),
+    [K('AKIA', 'IOSFODNN7', 'EXAMPLE')]);
+  assert('GitHub token', secret(`token ${K('ghp_', '1234567890abcdefghij', 'klmnopqrstuvwx')} here`),
+    [K('ghp_', '1234567890abcdefghij', 'klmnopqrstuvwx')]);
+  assertTrue('JWT detected',
+    secret(`${K('eyJhbGciOiJIUzI1NiJ9', '.eyJzdWIiOiIxMjM0NTY3ODkwIn0', '.dQw4w9WgXcQabcdefghij')}`).length === 1);
+
+  // A commit hash and a UUID are high-entropy but are not credentials.
+  // Flagging them would mask half of every technical conversation.
+  assert('git SHA is not a secret', secret('commit 4f9a2b1c8d3e5f7a9b0c2d4e6f8a1b3c5d7e9f0a broke it'), []);
+  assert('UUID is not a secret', secret('id 550e8400-e29b-41d4-a716-446655440000 here'), []);
+  assert('env var name is not a secret', secret('Set GITHUB_TOKEN before running.'), []);
+
+  // A credential contains digit runs that PHONE would otherwise claim.
+  // Masking half a token protects nothing and corrupts it, so SECRET wins.
+  {
+    const t = `token ${K('ghp_', '1234567890abcdefghij', 'klmnopqrstuvwx')} failed`;
+    assert('SECRET outranks PHONE inside a token',
+      detectPII(t).map((s) => s.type), ['SECRET']);
+  }
+}
+
+// ===========================================================================
 group('classifyEcho — separates verbatim from variant from absent');
 // ===========================================================================
 {

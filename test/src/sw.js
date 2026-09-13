@@ -119,5 +119,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Drop a tab's values as soon as it closes, rather than waiting for the
 // whole browser session to end. Works without the "tabs" permission.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.storage.session.remove(mapKey(tabId)).catch(() => {});
+  chrome.storage.session.remove(mapKey(tabId)).catch(() => { });
 });

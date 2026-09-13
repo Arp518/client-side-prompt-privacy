@@ -103,9 +103,39 @@ function buildSandbox(opts) {
     },
   };
 
+  // Stand-ins for the transports the canary watches. Each records calls and
+  // then behaves inertly, so the canary can be exercised without a network.
+  const transportCalls = [];
+
+  function FakeXHR() {}
+  FakeXHR.prototype.open = function (method, url) {
+    transportCalls.push({ transport: 'xhr', method, url });
+  };
+  FakeXHR.prototype.send = function () {};
+
+  function FakeWebSocket(url) {
+    transportCalls.push({ transport: 'ws', url });
+    this.url = url;
+  }
+  FakeWebSocket.CONNECTING = 0;
+  FakeWebSocket.OPEN = 1;
+
+  const navigatorStub = {
+    sendBeacon(url) {
+      transportCalls.push({ transport: 'beacon', url });
+      return true;
+    },
+  };
+
+  win.XMLHttpRequest = FakeXHR;
+  win.WebSocket = FakeWebSocket;
+
   const sandbox = {
     window: win,
     self: win,
+    navigator: navigatorStub,
+    Proxy,
+    Reflect,
     location: win.location,
     console: { log() {}, warn() {}, error() {} },
     Request,
@@ -126,6 +156,8 @@ function buildSandbox(opts) {
     win,
     listeners,
     relayed,
+    transportCalls,
+    navigator: navigatorStub,
     sentBodies,
     requestedUrls,
     kinds: () => relayed.map((m) => m.kind),

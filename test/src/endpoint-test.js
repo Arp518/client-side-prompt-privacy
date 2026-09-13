@@ -121,6 +121,62 @@ async function main() {
     }`
   );
 
+  // === transport canary =================================================
+  // Everything above assumes the send goes out via fetch(). If OpenAI ever
+  // moves it to XHR, sendBeacon or a WebSocket, the extension would keep
+  // loading, keep reporting itself active, and silently mask nothing. The
+  // canary turns that silent failure into a loud one.
+  r.group('transport canary (observe-only)');
+
+  const CONV = 'https://chatgpt.com/backend-api/f/conversation';
+  const OTHER = 'https://chatgpt.com/backend-api/models';
+
+  const before = h.transportCalls.length;
+
+  const xhrHit = new h.win.XMLHttpRequest();
+  xhrHit.open('POST', CONV);
+  const xhrMiss = new h.win.XMLHttpRequest();
+  xhrMiss.open('GET', OTHER);
+
+  h.navigator.sendBeacon(CONV, 'beacon-body-must-not-be-relayed');
+  h.navigator.sendBeacon(OTHER, 'beacon-body-must-not-be-relayed');
+
+  new h.win.WebSocket('wss://chatgpt.com/backend-api/f/conversation/stream');
+  new h.win.WebSocket('wss://chatgpt.com/other');
+
+  const warned = h.relayed
+    .filter((m) => m.kind === 'unintercepted-transport')
+    .map((m) => m.payload.transport);
+
+  r.check(
+    'warns on XMLHttpRequest to the conversation endpoint',
+    warned.includes('XMLHttpRequest'),
+    `warned: ${warned.join(', ')}`
+  );
+  r.check('warns on sendBeacon', warned.includes('sendBeacon'), `warned: ${warned.join(', ')}`);
+  r.check('warns on WebSocket', warned.includes('WebSocket'), `warned: ${warned.join(', ')}`);
+  r.check(
+    'stays quiet for unrelated URLs',
+    warned.length === 3,
+    `expected 3 warnings, got ${warned.length}: ${warned.join(', ')}`
+  );
+
+  // The canary must never interfere. Every call has to reach the real
+  // transport, unmodified — it is a smoke alarm, not a valve.
+  r.check(
+    'observe-only: every call still reached its transport',
+    h.transportCalls.length - before === 6,
+    `expected 6 pass-through calls, saw ${h.transportCalls.length - before}`
+  );
+
+  r.check(
+    'warning payload carries no request content',
+    !JSON.stringify(h.relayed.filter((m) => m.kind === 'unintercepted-transport')).includes(
+      'beacon-body-must-not-be-relayed'
+    ),
+    'the beacon body leaked into the warning'
+  );
+
   r.done(`${CASES.length} URLs exercised`);
 }
 

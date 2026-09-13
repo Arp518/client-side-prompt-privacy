@@ -433,6 +433,102 @@
     return response;
   };
 
+  // --- TRANSPORT CANARY --------------------------------------------------
+  //
+  // Everything above assumes ChatGPT sends messages with fetch(). That was
+  // confirmed live, and it is true today. The danger is the day it stops
+  // being true: if OpenAI moves the send to XHR, sendBeacon or a WebSocket,
+  // this extension would keep loading, keep reporting itself as active, and
+  // quietly mask nothing at all. Silent failure is the worst outcome
+  // available to a privacy tool — the user would have no reason to doubt it.
+  //
+  // So watch the other transports. This never rewrites a request; it only
+  // notices and complains. Because it does not mutate, the match here is
+  // deliberately BROAD — the opposite of ENDPOINT_MATCHERS, where a loose
+  // match caused real bugs. A false warning costs a console line; a missed
+  // one costs the user's data.
+  function looksLikeConversationUrl(url) {
+    try {
+      const raw = typeof url === "string" ? url : url && (url.url || url.href);
+      if (typeof raw !== "string") return false;
+      return /\/backend-api\/[^?#]*conversation/i.test(raw);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function warnUninterceptedTransport(transport, detail) {
+    relay("unintercepted-transport", { transport, ...detail });
+    console.warn(
+      `${LOG_PREFIX} ${transport} was used for a conversation request. ` +
+        `This extension only masks fetch(), so that request was NOT redacted. ` +
+        `The interception point needs updating.`
+    );
+  }
+
+  function installTransportCanary() {
+    try {
+      const XHR = window.XMLHttpRequest;
+      if (XHR && XHR.prototype && typeof XHR.prototype.open === "function") {
+        const originalOpen = XHR.prototype.open;
+        XHR.prototype.open = function (method, url) {
+          try {
+            if (looksLikeConversationUrl(url)) {
+              warnUninterceptedTransport("XMLHttpRequest", { method });
+            }
+          } catch (e) {
+            /* observation must never break the page */
+          }
+          return originalOpen.apply(this, arguments);
+        };
+      }
+    } catch (e) {
+      relay("error", { where: "canary/xhr", message: String(e) });
+    }
+
+    try {
+      if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+        const originalBeacon = navigator.sendBeacon.bind(navigator);
+        navigator.sendBeacon = function (url, data) {
+          try {
+            if (looksLikeConversationUrl(url)) {
+              warnUninterceptedTransport("sendBeacon", {});
+            }
+          } catch (e) {
+            /* ignore */
+          }
+          return originalBeacon(url, data);
+        };
+      }
+    } catch (e) {
+      relay("error", { where: "canary/sendBeacon", message: String(e) });
+    }
+
+    try {
+      const OriginalWebSocket = window.WebSocket;
+      if (typeof OriginalWebSocket === "function") {
+        // A Proxy keeps the prototype, the static constants and instanceof
+        // intact, which a hand-rolled wrapper function would quietly break.
+        window.WebSocket = new Proxy(OriginalWebSocket, {
+          construct(target, args) {
+            try {
+              if (looksLikeConversationUrl(args[0])) {
+                warnUninterceptedTransport("WebSocket", {});
+              }
+            } catch (e) {
+              /* ignore */
+            }
+            return Reflect.construct(target, args);
+          },
+        });
+      }
+    } catch (e) {
+      relay("error", { where: "canary/websocket", message: String(e) });
+    }
+  }
+
+  installTransportCanary();
+
   relay("injector-ready", { url: location.href });
   console.log(`${LOG_PREFIX} injector active — patched window.fetch`);
 })();

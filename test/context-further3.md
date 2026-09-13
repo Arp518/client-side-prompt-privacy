@@ -38,7 +38,7 @@ detector.js — credit-card detection now retries over real card lengths when th
 
 content-bridge.js — buffered debounced writes, sender validation, document_start, message text no longer persisted, console noise off by default.
 
-package.json — build, watch, and three test scripts. Previously there was no way to build at all.
+package.json — build, watch, and three test scripts. Previously there was no way to build at all.good
 
 Plus: removed the two AI-directed strings from the tracked docs and repaired the sentence one of them had split in half.
 

@@ -72,35 +72,72 @@ reported in their own table, so their guaranteed failure does not drag the
 headline number down. Labelling them now means the dataset never needs
 re-labelling later — which is how ground truth quietly drifts mid-project.
 
-## Baseline, as of 2026-09-13
+## Baseline, after Phase 6 (2026-09-13)
 
 130 prompts · 99 labelled spans · 58 clean prompts · 36 carrying decoys
 
 | | precision | recall | F1 |
 |---|---|---|---|
-| exact | 77.7% | 92.4% | **84.4%** |
-| overlap | 84.0% | 100.0% | **91.3%** |
+| exact | 92.6% | 100.0% | **96.1%** |
+| overlap | 92.6% | 100.0% | **96.1%** |
 
-**Recall is 100% in overlap mode — the detector currently misses nothing it
-is built to find.** Every point of lost quality is a false positive.
+Exact and overlap are now identical, which means there are no boundary
+errors left anywhere. **Recall is 100% — the detector misses nothing it is
+built to find.** Both remaining false positives are on deliberate decoys.
 
-### Known weaknesses, in priority order
-
-| Type | exact F1 | What's wrong |
+| Type | F1 | |
 |---|---|---|
-| `STREET_ADDRESS` | 45.5% | 100% in overlap mode, so it *finds* every address but gets the boundary wrong. The trailing `\.?` intended for `St.` also eats sentence-ending periods, so `742 Evergreen Terrace.` is captured with the full stop attached — the model then receives a sentence with no terminator. Also misses lowercase (`123 main st`). |
-| `PHONE` | 75.0% | Matches any 10-digit run: order numbers, part numbers, case IDs. Also fires *inside* API keys — `ghp_1234567890abc…` yields a PHONE match on the digit run, so a token gets partially mangled without being properly protected. |
-| `IPV4` | 81.5% | Four-part version strings are indistinguishable from IPs by shape alone (`3.11.4.2`, `1.2.3.4`). Genuinely ambiguous; needs context, not a better pattern. |
-| `SSN` | 88.9% | A policy number with SSN shape (`445-90-2210`) matches. Probably unfixable by pattern alone. |
-| `CREDIT_CARD` | 94.7% | The windowed retry carves a fake 13-digit Visa out of a 15-digit IMEI. Needs a length-boundary guard. |
+| `SECRET` | 100% | added in Phase 6 |
+| `EMAIL` `PHONE` `CREDIT_CARD` `DOB` `IPV6` `STREET_ADDRESS` | 100% | |
+| `IPV4` | 95.7% | one decoy remains |
+| `SSN` | 88.9% | one decoy remains |
+| `PHONE` | 82.8% | **deliberate** — see below |
 
-`EMAIL`, `DOB` and `IPV6` are at 100% on both modes.
+`PERSON`, `ORG` and `LOCATION` are labelled but unimplemented until Phase 8.
+
+### Phase 6 changes and what they were worth
+
+Starting point was 84.4% exact F1.
+
+| Change | Effect |
+|---|---|
+| Dropped the trailing `\.?` from `STREET_ADDRESS` | 45.5% → 100% exact. The period intended for `St.` was also eating sentence terminators, so the model received sentences with no full stop |
+| Card windows must align to whole digit groups | Stopped a 13-digit Visa being carved out of a 15-digit IMEI, with no recall loss |
+| Added `SECRET` | 100% precision and recall, and it fixed `PHONE` firing inside API keys for free — overlap resolution now awards those digit runs to `SECRET` |
+| `PHONE` needs punctuation or nearby phone wording | 82.8% → 100%, then **reverted** — see below |
+| `IPV4` suppressed after version wording | 81.5% → 95.7% |
+
+### PHONE precision is deliberately low
+
+Bare ten-digit runs match unconditionally, so order numbers, case ids and CI
+runner ids are masked alongside real phone numbers. Context gating was tried,
+reached 100% precision, and was reverted on purpose:
+
+- For a privacy tool a false negative is a leak and a false positive is an
+  annoyance. Those costs are not symmetric, so the default must be to detect.
+- It penalised the most likely input format. An Indian mobile number is
+  normally written as a bare ten-digit run with no surrounding cue, so the
+  gating failed hardest for the users a US-shaped pattern already serves worst.
+
+`82.8%` here is a chosen operating point, not an unfixed bug. Do not "improve"
+it without revisiting that trade.
+
+### The other remaining false positives are not bugs
+
+Both are genuinely undecidable from the text:
+
+- `99.95.100.0` in "our SLA target is 99.95.100.0 percent uptime" is a valid dotted quad.
+- `445-90-2210` as a policy number has exactly the shape of an SSN.
+
+They were left alone on purpose. Patching them would mean matching the
+dataset rather than the problem, and over-masking is the safe direction for
+a privacy tool anyway.
 
 ### Latency
 
-Not a concern. `tokenize()` costs **0.006 ms at p95** on a typical prompt, and
-**0.73 ms** on an 11 KB pasted document. Detection is nowhere near the send path's
-bottleneck, which leaves room for the NER tier in Phase 8.
+Not a concern. `tokenize()` costs **0.006 ms at p95** on a typical prompt and
+**0.73 ms** on an 11 KB pasted document, which leaves ample headroom for the
+NER tier in Phase 8.
 
 ## The regression gate
 

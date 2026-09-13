@@ -80,14 +80,14 @@ async function main() {
   r.check(
     'delta carries the real values',
     !!delta &&
-      Object.values(delta).includes(EMAIL) &&
-      Object.values(delta).includes(PHONE),
+    Object.values(delta).includes(EMAIL) &&
+    Object.values(delta).includes(PHONE),
     JSON.stringify(delta)
   );
   r.check(
     'delta is keyed by placeholder token',
     !!delta &&
-      Object.keys(delta).every((k) => /^\[[A-Z_]+_PLACEHOLDER_\d+\]$/.test(k)),
+    Object.keys(delta).every((k) => /^\[[A-Z_]+_PLACEHOLDER_\d+\]$/.test(k)),
     JSON.stringify(delta && Object.keys(delta))
   );
 
@@ -116,7 +116,7 @@ async function main() {
     'a later port offer is ignored',
     second.received.length === 0,
     `second port received ${second.received.length} messages — a page script ` +
-      'offering a port after ours could have hijacked the channel'
+    'offering a port after ours could have hijacked the channel'
   );
   r.check(
     'deltas keep flowing to the original port',
@@ -144,7 +144,7 @@ async function main() {
   r.check(
     'queued delta flushes once the port arrives',
     late.received.length === 1 &&
-      Object.values(late.received[0].delta).includes(EMAIL),
+    Object.values(late.received[0].delta).includes(EMAIL),
     `got ${late.received.length} deltas: ${JSON.stringify(late.received)}`
   );
 
@@ -183,7 +183,7 @@ async function main() {
   r.check(
     'tabs are isolated',
     fake.session['map:11']['[EMAIL_PLACEHOLDER_1]'] === EMAIL &&
-      fake.session['map:22']['[EMAIL_PLACEHOLDER_1]'] === 'bob@example.com',
+    fake.session['map:22']['[EMAIL_PLACEHOLDER_1]'] === 'bob@example.com',
     JSON.stringify(fake.session)
   );
 
@@ -210,10 +210,10 @@ async function main() {
   r.check(
     'vault-stats returns counts and types only',
     stats.ok &&
-      stats.total === 2 &&
-      stats.byType.EMAIL === 1 &&
-      stats.byType.PHONE === 1 &&
-      !JSON.stringify(stats).includes(EMAIL),
+    stats.total === 2 &&
+    stats.byType.EMAIL === 1 &&
+    stats.byType.PHONE === 1 &&
+    !JSON.stringify(stats).includes(EMAIL),
     JSON.stringify(stats)
   );
 
