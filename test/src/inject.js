@@ -72,9 +72,24 @@
   // If ChatGPT changes this endpoint again, re-run the Phase 0 Network-tab
   // check (send a message, watch for the real POST) before re-widening
   // this — don't just guess a new substring.
-  const ENDPOINT_MATCHERS = [
+  // Compared against the parsed URL's PATHNAME, never as a substring of the
+  // whole URL. Substring matching was the unfixed half of this bug: narrowing
+  // "conversation" to "/backend-api/f/conversation" stopped matching
+  // /backend-api/conversations (plural), but every sub-path still contains
+  // the prefix, so these were all still being intercepted:
+  //
+  //   /backend-api/f/conversation/prepare                      (handshake, no text)
+  //   /backend-api/f/conversation/experimental/generate_autocompletions
+  //   /backend-api/f/conversation/<id>/stream_status
+  //   /backend-api/f/conversation/init
+  //
+  // None carry the user's message, so each one cost a wasted parse ending in
+  // no-text-parts-found — which is the log noise that got misread as a broken
+  // parser in the first place. Once the response transform lands, wrapping
+  // those responses would be actively wrong.
+  const ENDPOINT_PATHS = new Set([
     "/backend-api/f/conversation",
-  ];
+  ]);
 
   // Flip to false to leave requests untouched and only observe (useful if
   // you want to isolate "can we see it" from "can we survive mutating it").
@@ -93,9 +108,23 @@
 
   function isTargetEndpoint(url) {
     try {
-      const s = typeof url === "string" ? url : url.url;
-      return ENDPOINT_MATCHERS.some((m) => s.includes(m));
+      const raw = typeof url === "string" ? url : url && url.url;
+      if (typeof raw !== "string" || raw.length === 0) return false;
+
+      // fetch() accepts relative URLs and `new URL()` throws on a bare path,
+      // so resolve against the page origin before reading the pathname.
+      // Using pathname also drops the query string and hash for free.
+      const { pathname } = new URL(raw, window.location.origin);
+
+      // Tolerate one trailing slash, nothing else.
+      const normalized =
+        pathname.length > 1 && pathname.endsWith("/")
+          ? pathname.slice(0, -1)
+          : pathname;
+
+      return ENDPOINT_PATHS.has(normalized);
     } catch (e) {
+      // Unparseable URL: leave the request alone rather than guessing.
       return false;
     }
   }

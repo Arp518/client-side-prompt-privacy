@@ -6,16 +6,16 @@
  * inject.js runs in the page's own JS realm, so every relay() payload is
  * readable by any script on the page (ChatGPT's own included), and
  * content-bridge.js persists all of them to chrome.storage.local. A single
- * careless `relay("...", { parsed })` turns the privacy tool into a
- * privacy leak — which is exactly what Stage 2 fixed (defect D8).
+ * careless `relay("...", { parsed })` turns the privacy tool into a privacy
+ * leak — which is exactly what defect D8 was.
  *
- * This test loads the REAL BUILT BUNDLE (dist/inject.bundle.js, not the
- * source) inside a sandboxed fake browser, pushes a request full of
- * synthetic PII through the patched fetch, and asserts:
+ * Runs the REAL BUILT BUNDLE, pushes synthetic PII through the patched
+ * fetch, and asserts:
  *
- *   1. No PII value appears in any relayed payload.
- *   2. No PII value appears in the outgoing request body.
+ *   1. No PII value appears in the outgoing request body.
+ *   2. No PII value appears in any relayed payload.
  *   3. The outgoing body DOES contain the expected placeholders.
+ *   4. The token session spans turns (defect D1), end to end.
  *
  * Run: node src/leak-test.js   (or npm run test:leak)
  *
@@ -24,13 +24,18 @@
 
 'use strict';
 
-const vm = require('node:vm');
-const fs = require('node:fs');
-const path = require('node:path');
+const {
+  buildSandbox,
+  loadBundle,
+  userMessageBody,
+  settle,
+  createReporter,
+  appearsIn,
+} = require('./test-harness');
 
-const BUNDLE = path.join(__dirname, '..', 'dist', 'inject.bundle.js');
+const SEND_URL = 'https://chatgpt.com/backend-api/f/conversation';
 
-// --- synthetic PII, one of each type the detector supports -----------------
+// One synthetic value per type the detector supports.
 const PII = {
   EMAIL: 'test@example.com',
   PHONE: '555-123-4567',
@@ -46,271 +51,123 @@ const PROMPT =
   `card ${PII.CREDIT_CARD}, server ${PII.IPV4}. ` +
   `I was born on ${PII.DOB} and live at ${PII.STREET_ADDRESS}.`;
 
-const REQUEST_BODY = JSON.stringify({
-  action: 'next',
-  conversation_id: 'abc-123',
-  messages: [
-    {
-      id: 'msg-1',
-      author: { role: 'user' },
-      content: { content_type: 'text', parts: [PROMPT] },
-    },
-  ],
-});
+const SECOND_EMAIL = 'bob@other-example.com';
 
-// --- fake browser ----------------------------------------------------------
+const r = createReporter('leak-test: no raw PII may cross the postMessage bridge');
 
-function buildSandbox() {
-  const relayed = [];
-  const sentBodies = [];
-  let sentBody = null;
-
-  // Stands in for ChatGPT's backend. Records what actually left the
-  // "browser", and returns a minimal SSE-ish streamed response so the
-  // tee()/stream path is exercised rather than skipped.
-  async function originalFetch(input, init) {
-    const isRequest = typeof input === 'object' && input !== null && 'url' in input;
-    sentBody = isRequest ? await input.clone().text() : init?.body ?? null;
-    sentBodies.push(sentBody);
-
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(
-          new TextEncoder().encode('data: {"v":"hello"}\n\n data: [DONE]\n\n')
-        );
-        controller.close();
-      },
-    });
-
-    return new Response(stream, {
-      status: 200,
-      statusText: 'OK',
-      headers: { 'content-type': 'text/event-stream' },
-    });
-  }
-
-  const win = {
-    fetch: originalFetch,
-    location: { href: 'https://chatgpt.com/', origin: 'https://chatgpt.com' },
-    postMessage(msg /*, targetOrigin */) {
-      relayed.push(msg);
-    },
-    addEventListener() {},
-  };
-
-  const sandbox = {
-    window: win,
-    self: win,
-    location: win.location,
-    console: { log() {}, warn() {}, error() {} },
-    Request,
-    Response,
-    Headers,
-    ReadableStream,
-    TextEncoder,
-    TextDecoder,
-    setTimeout,
-    clearTimeout,
-    queueMicrotask,
-  };
-  sandbox.globalThis = sandbox;
-
-  return {
-    sandbox,
-    win,
-    relayed,
-    getSentBody: () => sentBody,
-    getSentBodies: () => sentBodies,
-  };
-}
-
-/** Build a ChatGPT-shaped request body around one user prompt. */
-function bodyFor(prompt) {
-  return JSON.stringify({
-    action: 'next',
-    conversation_id: 'abc-123',
-    messages: [
-      {
-        id: 'msg-x',
-        author: { role: 'user' },
-        content: { content_type: 'text', parts: [prompt] },
-      },
-    ],
+async function send(h, prompt) {
+  const res = await h.win.fetch(SEND_URL, {
+    method: 'POST',
+    body: userMessageBody(prompt),
+    headers: { 'content-type': 'application/json' },
   });
-}
-
-// --- assertions ------------------------------------------------------------
-
-let failures = 0;
-
-function check(label, condition, detail) {
-  if (condition) {
-    console.log(`  PASS  ${label}`);
-  } else {
-    failures++;
-    console.log(`  FAIL  ${label}`);
-    if (detail) console.log(`        ${detail}`);
-  }
-}
-
-/** Every form a value might appear in: literal, and JSON-escaped. */
-function appearsIn(haystack, value) {
-  if (haystack.includes(value)) return true;
-  const escaped = JSON.stringify(value).slice(1, -1);
-  return escaped !== value && haystack.includes(escaped);
+  await res.text(); // drain so the tee()'d spy branch completes
+  return res;
 }
 
 async function main() {
-  if (!fs.existsSync(BUNDLE)) {
-    console.error(
-      `\nBundle not found at ${BUNDLE}\nRun \`npm run build\` first.\n`
-    );
-    process.exit(1);
-  }
+  const h = buildSandbox();
+  loadBundle(h);
 
-  console.log('\n=== leak-test: no raw PII may cross the postMessage bridge ===\n');
-
-  const { sandbox, win, relayed, getSentBody, getSentBodies } = buildSandbox();
-  const context = vm.createContext(sandbox);
-
-  vm.runInContext(fs.readFileSync(BUNDLE, 'utf8'), context, {
-    filename: 'dist/inject.bundle.js',
-  });
-
-  check(
+  r.check(
     'bundle patched window.fetch',
-    typeof win.fetch === 'function' && win.fetch.name === 'patchedFetch',
-    `got: ${win.fetch && win.fetch.name}`
+    typeof h.win.fetch === 'function' && h.win.fetch.name === 'patchedFetch',
+    `got: ${h.win.fetch && h.win.fetch.name}`
   );
 
-  const response = await win.fetch('https://chatgpt.com/backend-api/f/conversation', {
-    method: 'POST',
-    body: REQUEST_BODY,
-    headers: { 'content-type': 'application/json' },
-  });
+  await send(h, PROMPT);
+  await settle();
 
-  // Drain so the tee()'d spy branch completes and relays stream events.
-  await response.text();
-  await new Promise((r) => setTimeout(r, 20));
+  const sentBody = h.sentBodies[0];
+  const relayedJson = h.relayedJson();
 
-  const sentBody = getSentBody();
-  const relayedJson = JSON.stringify(relayed);
+  r.group('outgoing request');
 
-  // 1. The outgoing request must be tokenized.
-  check(
-    'outgoing body was mutated',
-    sentBody !== null && sentBody !== REQUEST_BODY,
+  r.check(
+    'body was mutated',
+    sentBody && sentBody !== userMessageBody(PROMPT),
     'body went out unchanged — detection or mutation did not run'
   );
-
-  check(
-    'outgoing body contains placeholders',
+  r.check(
+    'body contains placeholders',
     /\[[A-Z_]+_PLACEHOLDER_\d+\]/.test(sentBody || ''),
-    'no placeholder tokens found in the outgoing body'
+    'no placeholder tokens in the outgoing body'
   );
-
-  // 2. No PII may leave in the request body.
   for (const [type, value] of Object.entries(PII)) {
-    check(
-      `outgoing body redacted: ${type}`,
+    r.check(
+      `redacted: ${type}`,
       !appearsIn(sentBody || '', value),
       `found ${JSON.stringify(value)} in the request that left the browser`
     );
   }
 
-  // 3. No PII may cross the bridge. This is the D8 regression guard.
+  r.group('bridge payloads (defect D8)');
+
   for (const [type, value] of Object.entries(PII)) {
-    check(
-      `bridge payloads redacted: ${type}`,
+    r.check(
+      `not relayed: ${type}`,
       !appearsIn(relayedJson, value),
-      `found ${JSON.stringify(value)} in a relayed payload — ` +
-        'this would be persisted to chrome.storage.local and is readable by the page'
+      `found ${JSON.stringify(value)} in a relayed payload — this would be ` +
+        'persisted to chrome.storage.local and is readable by the page'
     );
   }
-
-  // The prompt itself must never be relayed wholesale, tokenized or not.
-  check(
-    'bridge payloads contain no prompt text',
+  r.check(
+    'no prompt text relayed',
     !relayedJson.includes('Email me at'),
     'raw prompt text found in a relayed payload'
   );
 
-  const kinds = relayed.map((m) => m.kind);
-  check(
+  const kinds = h.kinds();
+  r.check(
     'shape event relayed instead of raw body',
     kinds.includes('body-shape-captured') && !kinds.includes('raw-body-captured'),
     `kinds seen: ${kinds.join(', ')}`
   );
-
-  check(
+  r.check(
     'DEBUG_DUMP_RAW is off in the committed build',
     !kinds.some((k) => k.endsWith('-DEBUG')),
     `debug events present: ${kinds.filter((k) => k.endsWith('-DEBUG')).join(', ')}`
   );
 
-  const mutated = relayed.find((m) => m.kind === 'body-mutated');
-  check(
+  const mutated = h.relayed.find((m) => m.kind === 'body-mutated');
+  r.check(
     'body-mutated reports 7 replacements',
-    mutated?.payload?.replacements === 7,
-    `got: ${mutated?.payload?.replacements} (types: ${JSON.stringify(
-      mutated?.payload?.typesFound
-    )})`
+    mutated && mutated.payload && mutated.payload.replacements === 7,
+    `got: ${mutated && mutated.payload && mutated.payload.replacements} ` +
+      `(types: ${JSON.stringify(mutated && mutated.payload && mutated.payload.typesFound)})`
   );
 
-  // --- D1 integration: the session must span turns ------------------------
-  // The unit tests cover createTokenSession() directly; this proves
-  // inject.js actually holds one session across fetch calls rather than
-  // tokenizing each request from scratch.
-  console.log('\n  -- multi-turn (defect D1, through the real bundle) --');
+  r.group('multi-turn session (defect D1), through the real bundle');
 
-  const r2 = await win.fetch('https://chatgpt.com/backend-api/f/conversation', {
-    method: 'POST',
-    body: bodyFor('now email bob@other-example.com instead'),
-    headers: { 'content-type': 'application/json' },
-  });
-  await r2.text();
+  await send(h, `now email ${SECOND_EMAIL} instead`);
+  await send(h, `remind me, my email is ${PII.EMAIL}`);
+  await settle();
 
-  const r3 = await win.fetch('https://chatgpt.com/backend-api/f/conversation', {
-    method: 'POST',
-    body: bodyFor(`remind me, my email is ${PII.EMAIL}`),
-    headers: { 'content-type': 'application/json' },
-  });
-  await r3.text();
-  await new Promise((r) => setTimeout(r, 20));
+  const [, turn2, turn3] = h.sentBodies;
 
-  const bodies = getSentBodies();
-
-  check(
+  r.check(
     'turn 2 mints EMAIL_PLACEHOLDER_2, not a colliding _1',
-    bodies[1].includes('[EMAIL_PLACEHOLDER_2]') &&
-      !bodies[1].includes('[EMAIL_PLACEHOLDER_1]'),
-    `turn 2 body: ${bodies[1]}`
+    turn2.includes('[EMAIL_PLACEHOLDER_2]') && !turn2.includes('[EMAIL_PLACEHOLDER_1]'),
+    `turn 2 body: ${turn2}`
   );
-
-  check(
+  r.check(
     'turn 3 reuses _1 for the value first seen in turn 1',
-    bodies[2].includes('[EMAIL_PLACEHOLDER_1]'),
-    `turn 3 body: ${bodies[2]}`
+    turn3.includes('[EMAIL_PLACEHOLDER_1]'),
+    `turn 3 body: ${turn3}`
   );
-
-  check(
-    'turn 2 second email never sent in plaintext',
-    !bodies[1].includes('bob@other-example.com'),
-    `turn 2 body: ${bodies[1]}`
+  r.check(
+    "turn 2's email never sent in plaintext",
+    !turn2.includes(SECOND_EMAIL),
+    `turn 2 body: ${turn2}`
   );
-
-  check(
-    'no PII leaked across the bridge on any turn',
-    !Object.values(PII).some((v) => appearsIn(JSON.stringify(relayed), v)) &&
-      !JSON.stringify(relayed).includes('bob@other-example.com'),
+  r.check(
+    'no PII relayed on any turn',
+    !Object.values(PII).some((v) => appearsIn(h.relayedJson(), v)) &&
+      !h.relayedJson().includes(SECOND_EMAIL),
     'a later turn relayed a raw value'
   );
 
-  console.log(
-    `\n--- ${failures === 0 ? 'all checks passed' : `${failures} FAILED`} ` +
-      `(relayed kinds: ${kinds.join(', ')}) ---\n`
-  );
-  process.exit(failures > 0 ? 1 : 0);
+  r.done(`kinds: ${[...new Set(h.kinds())].join(', ')}`);
 }
 
 main().catch((e) => {

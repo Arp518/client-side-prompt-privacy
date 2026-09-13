@@ -6,10 +6,11 @@
   "scripts": {
     "build": "esbuild src/inject.js --bundle --format=iife --outfile=dist/inject.bundle.js",
     "watch": "npm run build -- --watch",
-    "test": "npm run test:unit && npm run test:tokenizer && npm run test:leak",
+    "test": "npm run test:unit && npm run test:tokenizer && npm run test:endpoint && npm run test:leak",
     "test:unit": "node src/smoke.js",
     "test:tokenizer": "node src/tokenizer-test.js",
-    "test:leak": "npm run build && node src/leak-test.js"
+    "test:leak": "npm run build && node src/leak-test.js",
+    "test:endpoint": "npm run build && node src/endpoint-test.js"
   },
   "keywords": [],
   "author": "",

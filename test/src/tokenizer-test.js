@@ -74,7 +74,7 @@ group('D1 — cross-message collision (the bug that corrupted turn 1)');
   assertTrue(
     'no token maps to two different values',
     new Set(Object.keys(map)).size === Object.keys(map).length &&
-      new Set(values).size === values.length
+    new Set(values).size === values.length
   );
 }
 
