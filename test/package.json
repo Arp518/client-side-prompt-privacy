@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "esbuild src/inject.js --bundle --outfile=dist/inject.bundle.js --platform=browser && esbuild src/content-bridge.js --bundle --outfile=dist/content-bridge.bundle.js --platform=browser",
+    "test": "node src/smoke.js && node src/adapter-smoke.js && node src/message-validator.test.js"
   },
   "keywords": [],
   "author": "",

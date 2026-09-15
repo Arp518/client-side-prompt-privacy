@@ -28,7 +28,7 @@
         "https://chat.openai.com/*"
       ],
       "js": [
-        "src/content-bridge.js"
+        "dist/content-bridge.bundle.js"
       ],
       "run_at": "document_idle"
     }

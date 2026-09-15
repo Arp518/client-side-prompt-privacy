@@ -80,16 +80,19 @@ async function appendToLog(entry) {
  * MAIN-WORLD → ISOLATED-WORLD BRIDGE
  * ========================================================== */
 
+// Validation logic lives in message-validator.js so it's testable under
+// plain Node — this file itself runs top-level browser code (chrome.*,
+// document) as soon as it loads, so it can't be required directly by a
+// test. Bundled in via esbuild, same as inject.js.
+const { isValidPhase0Message } = require('./message-validator');
+
 window.addEventListener("message", (event) => {
 
-  const msg = event.data;
-
-  if (
-    !msg ||
-    msg.source !== "pii-redact-phase0"
-  ) {
+  if (!isValidPhase0Message(event, window)) {
     return;
   }
+
+  const msg = event.data;
 
   console.log(
     `${LOG_PREFIX} [${msg.kind}]`,
