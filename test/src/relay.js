@@ -28,9 +28,14 @@ const SOURCE = 'pii-redact-phase0';
  * @param {object} payload - metadata only; never raw PII or prompt text
  */
 function relay(kind, payload) {
+  // Scoped to this origin rather than '*'. The header above is right that
+  // this does not hide the message from same-origin page scripts — nothing
+  // can, from the MAIN world — but '*' additionally permits delivery to a
+  // cross-origin opener or embedder, which scoping removes for free. The
+  // real defence remains not putting values in `payload`.
   window.postMessage(
     { source: SOURCE, kind, payload, ts: Date.now() },
-    '*'
+    window.location.origin
   );
 }
 

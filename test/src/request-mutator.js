@@ -40,10 +40,16 @@ function createRequestMutator({ relay, tokenSession, sendVaultDelta, debugDumpRa
     try {
       parsed = JSON.parse(rawBodyText);
     } catch (e) {
-      relay('body-not-json', {
-        rawBodyLength: rawBodyText.length,
-        rawBodyPreview: rawBodyText.slice(0, 200),
-      });
+      // Length only, never a preview. This branch runs precisely when the
+      // body is something we do not understand, and "not JSON" includes
+      // form-encoded and plain text, both of which can carry the prompt
+      // verbatim. Slicing 200 characters off it put raw PII onto the
+      // page-readable channel and into chrome.storage.local -- the same
+      // class of leak as D8, in the one code path where we have least idea
+      // what the bytes contain. Verified by driving the built bundle with a
+      // form-encoded body: the preview relayed an SSN and a card number in
+      // clear. The length is enough to diagnose payload drift.
+      relay('body-not-json', { rawBodyLength: rawBodyText.length });
       return { mutated: false, bodyText: rawBodyText };
     }
 

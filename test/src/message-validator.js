@@ -32,7 +32,7 @@ const ALLOWED_KINDS = new Set([
   'fetch-threw',
   'response-status',
   'possible-rejection',
-  'stream-chunk-sample',
+  'stream-chunk-shape',
   'stream-complete',
   'vault-channel-open',
   'unintercepted-transport',
@@ -44,8 +44,12 @@ const ALLOWED_KINDS = new Set([
 const KIND_VALIDATORS = {
   'injector-ready': (p) => typeof p?.url === 'string',
   'request-seen': (p) => typeof p?.url === 'string',
-  'body-not-json': (p) =>
-    typeof p?.rawBodyLength === 'number' || typeof p?.rawBodyPreview === 'string',
+  // Length only. Accepting a preview here would re-admit the body of a
+  // request we failed to parse -- which may be form-encoded or plain text
+  // carrying the prompt verbatim -- onto the page-readable channel and into
+  // storage. Failing closed on the field means a future reintroduction of
+  // the preview is rejected at the bridge rather than persisted.
+  'body-not-json': (p) => typeof p?.rawBodyLength === 'number',
   'body-received': (p) =>
     typeof p?.endpointMatched === 'boolean' &&
     typeof p?.textLocationsFound === 'number',
@@ -59,8 +63,14 @@ const KIND_VALIDATORS = {
   'fetch-threw': (p) => typeof p?.message === 'string',
   'response-status': (p) => typeof p?.status === 'number' && typeof p?.ok === 'boolean',
   'possible-rejection': (p) => typeof p?.note === 'string' && typeof p?.status === 'number',
-  'stream-chunk-sample': (p) =>
-    typeof p?.chunkCount === 'number' && typeof p?.preview === 'string',
+  // Shape only. There is deliberately no field here that could carry reply
+  // text: the event is named for what it reports, and a validator that
+  // accepted a preview would re-admit response content to storage the
+  // moment someone added one back.
+  'stream-chunk-shape': (p) =>
+    typeof p?.chunkCount === 'number' &&
+    typeof p?.bytes === 'number' &&
+    typeof p?.looksLikeSse === 'boolean',
   'stream-complete': (p) =>
     typeof p?.chunkCount === 'number' && typeof p?.totalBytesApprox === 'number',
   'vault-channel-open': (p) => typeof p === 'object' && p !== null,

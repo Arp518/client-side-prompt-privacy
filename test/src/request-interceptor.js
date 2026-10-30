@@ -90,20 +90,18 @@ function installFetchInterceptor({ relay, mutateBodyText, mutateBody = true }) {
         const { mutated, bodyText } = mutateBodyText(rawBodyText);
         if (mutated) {
           if (input instanceof Request) {
-            finalInput = new Request(input.url, {
-              method: input.method,
-              headers: input.headers,
-              body: bodyText,
-              credentials: input.credentials,
-              mode: input.mode,
-              cache: input.cache,
-              redirect: input.redirect,
-              referrer: input.referrer,
-              referrerPolicy: input.referrerPolicy,
-              integrity: input.integrity,
-              keepalive: input.keepalive,
-              signal: input.signal,
-            });
+            // Construct FROM the original Request and override only the
+            // body. Per the Fetch Standard that inherits every field the
+            // original carried, which a hand-copied list cannot promise: the
+            // twelve-field version this replaces still missed `duplex`, and
+            // an earlier revision omitted `signal`, which silently made
+            // "stop generating" a no-op on every request we touched because
+            // the AbortSignal lives on the Request rather than on init.
+            //
+            // `input` here is the ORIGINAL, unconsumed Request: the body was
+            // read from input.clone() above, so this one is still intact.
+            // Using the already-read clone would throw.
+            finalInput = new Request(input, { body: bodyText });
           } else {
             // fetch(url, init) form: init is a plain object, so spreading
             // it already preserves every field the caller set (headers,
@@ -165,8 +163,24 @@ function installFetchInterceptor({ relay, mutateBodyText, mutateBody = true }) {
               totalChars += value.length;
               const text = decoder.decode(value, { stream: true });
               if (chunkCount <= 3) {
-                // Only log the first few chunks to avoid flooding the console
-                relay('stream-chunk-sample', { chunkCount, preview: text.slice(0, 150) });
+                // SHAPE, never content, and only for the first few chunks.
+                //
+                // This used to relay 150 characters of the reply, which is
+                // persisted to chrome.storage.local and readable by the
+                // page. Today that text carries placeholders rather than
+                // values, because the model only ever saw placeholders --
+                // but the moment response restoration lands it carries the
+                // real values again, and this line would write them
+                // straight to disk. The questions it exists to answer are
+                // "is the spy branch reading at all" and "does the response
+                // still look like the format we parse", and neither needs
+                // content.
+                relay('stream-chunk-shape', {
+                  chunkCount,
+                  bytes: value.length,
+                  looksLikeSse: /^(?:data|event):/m.test(text),
+                  frameDelimiters: (text.match(/\n\n/g) || []).length,
+                });
               }
             }
             relay('stream-complete', { chunkCount, totalBytesApprox: totalChars });
