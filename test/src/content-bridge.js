@@ -24,18 +24,44 @@ const LOG_PREFIX = "[PII-REDACT PHASE0][bridge]";
 
 const STORAGE_KEY = "phase0_log";
 const MAX_LOG_ENTRIES = 200;
+const FLUSH_DEBOUNCE_MS = 500;
 
 const ROLE_SELECTOR = "[data-message-author-role]";
+
+// Set to true to log every MutationObserver batch. Off by default: the
+// observer watches all of document.body, so during streaming this fires
+// hundreds of times per reply, floods the console, and skews any latency
+// measurement taken on the same page.
+const DEBUG_OBSERVER = false;
 
 let contextInvalidated = false;
 
 
 /* ============================================================
  * STORAGE
+ *
+ * Writes are buffered in memory and flushed on a debounce.
+ *
+ * The previous implementation did get() -> mutate -> set() per event
+ * with no serialization. Because the MutationObserver is a high-rate
+ * writer, concurrent calls interleaved and silently dropped entries —
+ * under exactly the burst conditions (a streaming reply) that the log
+ * exists to record. Buffering also collapses a burst into one write.
  * ========================================================== */
 
-async function appendToLog(entry) {
+let pendingEntries = [];
+let flushTimer = null;
+
+async function flushLog() {
+  flushTimer = null;
+
   if (contextInvalidated) return;
+  if (pendingEntries.length === 0) return;
+
+  // Take the buffer before awaiting, so entries arriving mid-write are
+  // not lost to the next flush.
+  const batch = pendingEntries;
+  pendingEntries = [];
 
   try {
     const result = await chrome.storage.local.get(STORAGE_KEY);
@@ -44,7 +70,7 @@ async function appendToLog(entry) {
       ? result[STORAGE_KEY]
       : [];
 
-    existing.push(entry);
+    existing.push(...batch);
 
     while (existing.length > MAX_LOG_ENTRIES) {
       existing.shift();
@@ -75,6 +101,90 @@ async function appendToLog(entry) {
   }
 }
 
+function appendToLog(entry) {
+  if (contextInvalidated) return;
+
+  pendingEntries.push(entry);
+
+  // Bound memory if flushes keep failing.
+  if (pendingEntries.length > MAX_LOG_ENTRIES * 2) {
+    pendingEntries = pendingEntries.slice(-MAX_LOG_ENTRIES);
+  }
+
+  if (flushTimer === null) {
+    flushTimer = setTimeout(flushLog, FLUSH_DEBOUNCE_MS);
+  }
+}
+
+// Don't lose a pending batch when the tab is hidden or torn down.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushLog();
+});
+window.addEventListener("pagehide", flushLog);
+
+
+/* ============================================================
+ * PRIVATE CHANNEL TO THE MAIN WORLD
+ *
+ * The window.postMessage bridge below is page-readable, so it only ever
+ * carries counts, types and shapes. Real token->value pairs need a
+ * channel the page cannot observe, so we create a MessageChannel and
+ * transfer one port into the MAIN world in a single message that carries
+ * no data of its own. Everything sensitive flows over the port.
+ *
+ * Handshake is two-way because content-script execution order between the
+ * MAIN and ISOLATED worlds at document_start is not guaranteed: we offer
+ * the port on load, and also re-offer when inject.js asks. Either ordering
+ * converges, and inject.js accepts only the first port it receives.
+ *
+ * Note the port is offered exactly once. See the matching comment in
+ * inject.js for the residual risk this does not eliminate.
+ * ========================================================== */
+
+let vaultPortOffered = false;
+
+function offerVaultPort() {
+  if (vaultPortOffered) return;
+  vaultPortOffered = true;
+
+  const channel = new MessageChannel();
+
+  channel.port1.onmessage = (event) => {
+    const msg = event.data;
+    if (!msg || msg.kind !== "map-update") return;
+    forwardToWorker({
+      source: "pii-redact",
+      kind: "map-update",
+      delta: msg.delta,
+    });
+  };
+
+  window.postMessage(
+    { source: "pii-redact-port-offer" },
+    window.location.origin,
+    [channel.port2]
+  );
+}
+
+function forwardToWorker(message) {
+  if (contextInvalidated) return;
+  try {
+    chrome.runtime.sendMessage(message).catch((e) => {
+      if (String(e).includes("Extension context invalidated")) {
+        contextInvalidated = true;
+        return;
+      }
+      console.warn(`${LOG_PREFIX} worker message failed`, e);
+    });
+  } catch (e) {
+    if (String(e).includes("Extension context invalidated")) {
+      contextInvalidated = true;
+      return;
+    }
+    console.warn(`${LOG_PREFIX} worker message threw`, e);
+  }
+}
+
 
 /* ============================================================
  * MAIN-WORLD → ISOLATED-WORLD BRIDGE
@@ -93,6 +203,11 @@ window.addEventListener("message", (event) => {
   }
 
   const msg = event.data;
+
+  // inject.js loaded after us and missed the port offer -- re-offer.
+  if (msg.kind === "injector-ready" && !vaultPortOffered) {
+    offerVaultPort();
+  }
 
   console.log(
     `${LOG_PREFIX} [${msg.kind}]`,
@@ -293,7 +408,11 @@ function describeMessageElement(messageEl) {
   return {
     role: role,
 
+    // In-memory only — used to build a dedup key when no message id is
+    // present. Stripped before anything is persisted (see logMessage).
     textPreview: text.slice(0, 200),
+
+    textLength: text.length,
 
     messageId:
       messageEl.getAttribute(
@@ -450,15 +569,24 @@ function startDomFallbackObserver() {
     loggedTextCount++;
 
 
-    console.log(
-      `${LOG_PREFIX} [dom-mutation-observed]`,
-      info
-    );
+    // Drop the rendered message text before it reaches the console or
+    // chrome.storage.local. This is observed conversation content — it
+    // contains exactly the PII the extension exists to protect, and the
+    // research log is supposed to hold types/counts/events only.
+    const { textPreview, ...redacted } = info;
+
+
+    if (DEBUG_OBSERVER) {
+      console.log(
+        `${LOG_PREFIX} [dom-mutation-observed]`,
+        redacted
+      );
+    }
 
 
     appendToLog({
       kind: "dom-mutation-observed",
-      payload: info,
+      payload: redacted,
       ts: Date.now(),
     });
   }
@@ -470,13 +598,15 @@ function startDomFallbackObserver() {
       mutationCount += mutations.length;
 
 
-      console.log(
-        `${LOG_PREFIX} [dom-batch]`,
-        {
-          mutations: mutations.length,
-          totalMutations: mutationCount,
-        }
-      );
+      if (DEBUG_OBSERVER) {
+        console.log(
+          `${LOG_PREFIX} [dom-batch]`,
+          {
+            mutations: mutations.length,
+            totalMutations: mutationCount,
+          }
+        );
+      }
 
 
       for (const mutation of mutations) {
@@ -592,30 +722,34 @@ function startDomFallbackObserver() {
                   .slice(0, 120);
 
 
-              console.log(
-                `${LOG_PREFIX} [added-node-no-role]`,
-                {
-                  tag: node.tagName,
-                  className:
-                    typeof node.className === "string"
-                      ? node.className.slice(0, 120)
-                      : "",
-                  textPreview: text,
-                }
-              );
+              if (DEBUG_OBSERVER) {
+                console.log(
+                  `${LOG_PREFIX} [added-node-no-role]`,
+                  {
+                    tag: node.tagName,
+                    className:
+                      typeof node.className === "string"
+                        ? node.className.slice(0, 120)
+                        : "",
+                    textLength: text.length,
+                  }
+                );
+              }
             }
           }
         }
       }
 
 
-      console.log(
-        `${LOG_PREFIX} [dom-batch-complete]`,
-        {
-          totalMutations: mutationCount,
-          loggedTextEntries: loggedTextCount,
-        }
-      );
+      if (DEBUG_OBSERVER) {
+        console.log(
+          `${LOG_PREFIX} [dom-batch-complete]`,
+          {
+            totalMutations: mutationCount,
+            loggedTextEntries: loggedTextCount,
+          }
+        );
+      }
     });
 
 
@@ -642,9 +776,26 @@ function startDomFallbackObserver() {
  * START
  * ========================================================== */
 
-startDomFallbackObserver();
+// Offer the private port first, synchronously, before anything else runs.
+// This is at document_start, ahead of any page script, which is what makes
+// the handshake defensible.
+offerVaultPort();
+
+// This script now runs at document_start so it is listening before
+// inject.js posts `injector-ready` (previously it loaded at document_idle
+// and every event before that was dropped). At document_start there is no
+// document.body yet, so the observer has to wait for it.
+if (document.body) {
+  startDomFallbackObserver();
+} else {
+  document.addEventListener(
+    "DOMContentLoaded",
+    () => startDomFallbackObserver(),
+    { once: true }
+  );
+}
 
 
 console.log(
   `${LOG_PREFIX} bridge active on ${location.href}`
-);  
+);

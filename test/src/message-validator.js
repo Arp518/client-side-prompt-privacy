@@ -24,6 +24,7 @@ const ALLOWED_KINDS = new Set([
   'request-seen',
   'body-not-json',
   'body-received',
+  'body-shape-captured',
   'no-text-parts-found',
   'no-pii-matched',
   'body-mutated',
@@ -33,6 +34,8 @@ const ALLOWED_KINDS = new Set([
   'possible-rejection',
   'stream-chunk-sample',
   'stream-complete',
+  'vault-channel-open',
+  'unintercepted-transport',
 ]);
 
 // Per-kind field validation. Deliberately loose (checking types, not exact
@@ -41,16 +44,17 @@ const ALLOWED_KINDS = new Set([
 const KIND_VALIDATORS = {
   'injector-ready': (p) => typeof p?.url === 'string',
   'request-seen': (p) => typeof p?.url === 'string',
-  'body-not-json': (p) => typeof p?.rawBodyLength === 'number',
+  'body-not-json': (p) =>
+    typeof p?.rawBodyLength === 'number' || typeof p?.rawBodyPreview === 'string',
   'body-received': (p) =>
     typeof p?.endpointMatched === 'boolean' &&
     typeof p?.textLocationsFound === 'number',
+  'body-shape-captured': (p) => typeof p === 'object' && p !== null,
   'no-text-parts-found': (p) => typeof p?.note === 'string',
   'no-pii-matched': (p) => typeof p?.note === 'string',
   'body-mutated': (p) =>
     typeof p?.replacements === 'number' &&
-    typeof p?.matchTypeCounts === 'object' &&
-    typeof p?.locationsMutated === 'number',
+    (typeof p?.matchTypeCounts === 'object' || typeof p?.typesFound === 'object'),
   error: (p) => typeof p?.where === 'string' && typeof p?.message === 'string',
   'fetch-threw': (p) => typeof p?.message === 'string',
   'response-status': (p) => typeof p?.status === 'number' && typeof p?.ok === 'boolean',
@@ -59,6 +63,8 @@ const KIND_VALIDATORS = {
     typeof p?.chunkCount === 'number' && typeof p?.preview === 'string',
   'stream-complete': (p) =>
     typeof p?.chunkCount === 'number' && typeof p?.totalBytesApprox === 'number',
+  'vault-channel-open': (p) => typeof p === 'object' && p !== null,
+  'unintercepted-transport': (p) => typeof p?.transport === 'string',
 };
 
 /**

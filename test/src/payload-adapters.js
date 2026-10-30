@@ -40,6 +40,10 @@ function chatgptMessagesPartsAdapter(parsedBody) {
   if (!Array.isArray(messages)) return locations;
 
   messages.forEach((m, mIndex) => {
+    // Only user messages should be rewritten. Regenerate/edit payloads can carry
+    // assistant or system turns; tokenizing those would corrupt conversation history.
+    if (m?.author?.role && m.author.role !== 'user') return;
+
     const parts = m?.content?.parts;
     if (!Array.isArray(parts)) return;
 
@@ -77,6 +81,7 @@ function chatgptFlatContentAdapter(parsedBody) {
   if (!Array.isArray(messages)) return locations;
 
   messages.forEach((m, mIndex) => {
+    if (m?.author?.role && m.author.role !== 'user') return;
     if (typeof m?.content !== 'string') return;
     locations.push({
       path: `messages[${mIndex}].content`,

@@ -1,7 +1,7 @@
 'use strict';
 
-const { detectPII } = require('../src/detector');
-const { tokenize, detokenize } = require('../src/tokenizer');
+const { detectPII } = require('./detector');
+const { tokenize, detokenize } = require('./tokenizer');
 
 const cases = [
   {

@@ -22,18 +22,30 @@
 // If ChatGPT changes this endpoint again, re-run the Phase 0 Network-tab
 // check (send a message, watch for the real POST) before adding a new
 // entry here — don't guess.
-const ENDPOINT_MATCHERS = [
+const ENDPOINT_PATHS = new Set([
   '/backend-api/f/conversation',
-];
+]);
+const ENDPOINT_MATCHERS = Array.from(ENDPOINT_PATHS);
 
 function isTargetEndpoint(url) {
   try {
-    const s = typeof url === 'string' ? url : url.url;
-    const pathname = new URL(s, location.origin).pathname;
-    // Exact match only. Matching is done against the pathname alone, not
-    // the full string, so query params or a different origin can't cause
-    // an accidental match either.
-    return ENDPOINT_MATCHERS.some((m) => pathname === m);
+    const raw = typeof url === 'string' ? url : url && (url.url || url.href);
+    if (typeof raw !== 'string' || raw.length === 0) return false;
+
+    const origin =
+      (typeof location !== 'undefined' && location.origin) ||
+      (typeof window !== 'undefined' && window.location && window.location.origin) ||
+      'https://chatgpt.com';
+
+    const { pathname } = new URL(raw, origin);
+
+    // Tolerate one trailing slash, nothing else.
+    const normalized =
+      pathname.length > 1 && pathname.endsWith('/')
+        ? pathname.slice(0, -1)
+        : pathname;
+
+    return ENDPOINT_PATHS.has(normalized);
   } catch (e) {
     return false;
   }
@@ -78,17 +90,20 @@ function installFetchInterceptor({ relay, mutateBodyText, mutateBody = true }) {
         const { mutated, bodyText } = mutateBodyText(rawBodyText);
         if (mutated) {
           if (input instanceof Request) {
-            // Inherit everything from the original Request and override
-            // only the body, instead of manually copying a fixed property
-            // list (which silently drops anything not on that list —
-            // signal, integrity, keepalive, referrerPolicy, duplex).
-            // `new Request(existingRequest, init)` inherits the full set
-            // per spec.
-            //
-            // Important: `input` here must be the *original*, unconsumed
-            // Request, not `cloned` (which had its body read via .text()
-            // above) — using the already-read one would throw.
-            finalInput = new Request(input, { body: bodyText });
+            finalInput = new Request(input.url, {
+              method: input.method,
+              headers: input.headers,
+              body: bodyText,
+              credentials: input.credentials,
+              mode: input.mode,
+              cache: input.cache,
+              redirect: input.redirect,
+              referrer: input.referrer,
+              referrerPolicy: input.referrerPolicy,
+              integrity: input.integrity,
+              keepalive: input.keepalive,
+              signal: input.signal,
+            });
           } else {
             // fetch(url, init) form: init is a plain object, so spreading
             // it already preserves every field the caller set (headers,

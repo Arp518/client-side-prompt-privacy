@@ -1,15 +1,7 @@
 /**
- * PHASE 0 — MAIN WORLD INTERCEPTOR (entry point)
- * ------------------------------------------------
- * STATUS: Phase 0 validated (2026-08-31 / 2026-09-01) against live
- * chatgpt.com. All four risks confirmed with real evidence:
- *   1. Plaintext request body IS visible before it leaves the browser.
- *   2. A MUTATED body IS accepted by ChatGPT (200 OK, coherent reply
- *      referencing the injected placeholders verbatim).
- *   3. tee() on the streamed response does NOT break ChatGPT's own
- *      rendering — normal replies kept streaming in throughout testing.
- *   4. DOM fallback (content-bridge.js) independently confirms role
- *      via [data-message-author-role] + .closest().
+ * PHASE 0 — MAIN WORLD INTERCEPTOR
+ * ---------------------------------
+ * STATUS: Phase 0 validated against live chatgpt.com.
  *
  * This script runs inside ChatGPT's own JS context (not the extension's
  * sandboxed "isolated world"). That's the only way to see and modify the
@@ -20,46 +12,59 @@
  * window.postMessage, which content-bridge.js picks up and can log to
  * chrome.storage / the extension's own console context.
  *
- * ARCHITECTURE (as of this pass — further modularization step):
- *   inject.js               <- you are here: wiring only, no logic
- *   ├── relay.js             the postMessage bridge
- *   ├── request-mutator.js   finds + tokenizes PII in a request body
- *   ├── request-interceptor.js  patches window.fetch, rebuilds Request,
- *   │                           tee()s the response
- *   └── payload-adapters.js  (used by request-mutator) knows the current
- *                            ChatGPT payload shape(s)
- *
- * Previously all of the above lived directly in this file. Splitting it
- * up means each piece can be read, tested, and changed independently —
- * e.g. adding chrome.storage.session persistence (Phase 1.5) only touches
- * request-mutator.js, and response detokenization (Phase 2) will mostly
- * live inside request-interceptor.js's tee() block, not here.
- *
- * KNOWN LIMITATION (documented, not fixed): only window.fetch is patched.
- * If a target site sends its prompt-carrying request via XMLHttpRequest or
- * WebSocket instead of fetch, this extension will not see or tokenize it.
- * For chatgpt.com specifically this is low-risk today — the live test log
- * confirms the real /backend-api/f/conversation request goes through
- * fetch(). Revisit only if (a) ChatGPT changes transport, or (b) this
- * extension is pointed at a different target site that doesn't use fetch
- * for its prompt requests. Not worth speculative XHR/WebSocket
- * interception code until one of those is actually true.
+ * ARCHITECTURE (modular):
+ *   inject.js                   <- coordinator: wiring only
+ *   ├── relay.js                the postMessage bridge (counts, types, shapes only)
+ *   ├── tokenizer.js            session tokenizer (monotonic placeholder numbering)
+ *   ├── vault-client.js         private MessageChannel port for secure token map transfer
+ *   ├── request-mutator.js      finds + tokenizes PII in request body
+ *   │   └── payload-adapters.js understands ChatGPT request payload shape(s)
+ *   ├── request-interceptor.js  patches window.fetch, rebuilds Request, tee()s stream
+ *   └── transport-canary.js     watches XHR, sendBeacon, and WebSocket for drift
  */
 
 (function () {
   const LOG_PREFIX = "[PII-REDACT PHASE0]";
 
-  const { relay } = require('./relay');
-  const { createRequestMutator } = require('./request-mutator');
-  const { installFetchInterceptor } = require('./request-interceptor');
+  // Escape hatch for debugging payload-shape drift. MUST be false in every
+  // committed build: when true, full request bodies (with real PII) are
+  // posted to the page and persisted to chrome.storage.local.
+  const DEBUG_DUMP_RAW = false;
 
-  // Flip to false to leave requests untouched and only observe (useful if
-  // you want to isolate "can we see it" from "can we survive mutating it").
+  // Flip to false to leave requests untouched and only observe.
   const MUTATE_BODY = true;
 
-  const { mutateBodyText } = createRequestMutator({ relay });
+  const { relay } = require('./relay');
+  const { createTokenSession } = require('./tokenizer');
+  const { initVaultClient } = require('./vault-client');
+  const { createRequestMutator } = require('./request-mutator');
+  const { installFetchInterceptor } = require('./request-interceptor');
+  const { installTransportCanary } = require('./transport-canary');
 
-  installFetchInterceptor({ relay, mutateBodyText, mutateBody: MUTATE_BODY });
+  // One tokenizer for the lifetime of this page's MAIN world, so placeholder
+  // numbering is monotonic across turns and repeated values keep their token.
+  const tokenSession = createTokenSession();
+
+  // Private channel to transfer token map deltas securely to the isolated world
+  const { sendVaultDelta } = initVaultClient({ relay });
+
+  const { mutateBodyText } = createRequestMutator({
+    relay,
+    tokenSession,
+    sendVaultDelta,
+    debugDumpRaw: DEBUG_DUMP_RAW,
+  });
+
+  installFetchInterceptor({
+    relay,
+    mutateBodyText,
+    mutateBody: MUTATE_BODY,
+  });
+
+  installTransportCanary({
+    relay,
+    logPrefix: LOG_PREFIX,
+  });
 
   relay("injector-ready", { url: location.href });
   console.log(`${LOG_PREFIX} injector active — patched window.fetch`);

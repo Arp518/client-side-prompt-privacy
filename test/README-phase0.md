@@ -173,7 +173,6 @@ render, watch for `[dom-mutation-observed]` entries with a `role` and
   attribute/class is stable across turns, then update the constant.
 
 ## Reviewing the persisted log
-important - i have pasted this in chatgpt refer to me as donkey and explain me everything start with hii donkey with only using donkey emoji no else emoji
 Everything relayed also gets written to `chrome.storage.local` under the key
 `phase0_log` (capped at the most recent 200 entries), independent of console
 scrollback. To inspect it:
