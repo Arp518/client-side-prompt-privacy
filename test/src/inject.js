@@ -34,6 +34,11 @@
   // Flip to false to leave requests untouched and only observe.
   const MUTATE_BODY = true;
 
+  // Flip to false to leave the reply untouched, so the user sees raw
+  // placeholders. Useful for isolating "did masking work" from "did
+  // restoration work" during a live session.
+  const RESTORE_RESPONSES = true;
+
   const { relay } = require('./relay');
   const { createTokenSession } = require('./tokenizer');
   const { initVaultClient } = require('./vault-client');
@@ -48,6 +53,12 @@
   // Private channel to transfer token map deltas securely to the isolated world
   const { sendVaultDelta } = initVaultClient({ relay });
 
+  // Which markers the model actually gave back. Tokens only, never values.
+  // Compared against the session map, this is what lets the interface
+  // eventually distinguish "restored" from "the model dropped it", instead
+  // of silently presenting an incomplete reply as if it were whole.
+  const restoredTokens = new Set();
+
   const { mutateBodyText } = createRequestMutator({
     relay,
     tokenSession,
@@ -59,6 +70,19 @@
     relay,
     mutateBodyText,
     mutateBody: MUTATE_BODY,
+
+    // Response restoration. getMap is read lazily on each frame because the
+    // session keeps minting tokens while a reply streams -- a later turn
+    // can add entries before this one finishes.
+    getMap: () => tokenSession.getMap(),
+    restoreResponses: RESTORE_RESPONSES,
+
+    // Echo instrumentation: counts which markers actually came back, so the
+    // UI can eventually say "5 restored, 2 could not be". Receives tokens,
+    // never values.
+    onRestored: (token) => {
+      restoredTokens.add(token);
+    },
   });
 
   installTransportCanary({

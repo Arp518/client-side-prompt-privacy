@@ -10,6 +10,8 @@
 
 'use strict';
 
+const { withRestoredBody } = require('./response-transform');
+
 // Exact pathnames only — NOT substring matching. An earlier version used
 // s.includes("/backend-api/f/conversation"), which (harmlessly, since it's
 // a prefix) still matched /backend-api/f/conversation/prepare too. Prepare
@@ -58,8 +60,20 @@ function isTargetEndpoint(url) {
  * @param {(kind: string, payload: object) => void} deps.relay
  * @param {(rawBodyText: string) => {mutated: boolean, bodyText: string}} deps.mutateBodyText
  * @param {boolean} [deps.mutateBody=true] - flip to false to observe only
+ * @param {() => Record<string,string>} [deps.getMap] - the session's
+ *        placeholder-to-value map, read lazily on the response path. Omit
+ *        to disable restoration and leave the reply untouched.
+ * @param {boolean} [deps.restoreResponses=true]
+ * @param {(token: string) => void} [deps.onRestored] - echo instrumentation
  */
-function installFetchInterceptor({ relay, mutateBodyText, mutateBody = true }) {
+function installFetchInterceptor({
+  relay,
+  mutateBodyText,
+  mutateBody = true,
+  getMap,
+  restoreResponses = true,
+  onRestored,
+}) {
   const originalFetch = window.fetch.bind(window);
 
   window.fetch = async function patchedFetch(input, init) {
@@ -140,65 +154,20 @@ function installFetchInterceptor({ relay, mutateBodyText, mutateBody = true }) {
       });
     }
 
-    // Split the body into two identical streams: one we read ourselves (to
-    // log/eventually detokenize — Phase 2, not yet implemented), one we
-    // hand back untouched so ChatGPT's own UI renders exactly as it
-    // normally would.
-    if (response.body) {
-      try {
-        const [uiBranch, spyBranch] = response.body.tee();
-
-        // Read our branch in the background without blocking the response
-        // we return to the page.
-        (async () => {
-          const reader = spyBranch.getReader();
-          const decoder = new TextDecoder();
-          let chunkCount = 0;
-          let totalChars = 0;
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              chunkCount += 1;
-              totalChars += value.length;
-              const text = decoder.decode(value, { stream: true });
-              if (chunkCount <= 3) {
-                // SHAPE, never content, and only for the first few chunks.
-                //
-                // This used to relay 150 characters of the reply, which is
-                // persisted to chrome.storage.local and readable by the
-                // page. Today that text carries placeholders rather than
-                // values, because the model only ever saw placeholders --
-                // but the moment response restoration lands it carries the
-                // real values again, and this line would write them
-                // straight to disk. The questions it exists to answer are
-                // "is the spy branch reading at all" and "does the response
-                // still look like the format we parse", and neither needs
-                // content.
-                relay('stream-chunk-shape', {
-                  chunkCount,
-                  bytes: value.length,
-                  looksLikeSse: /^(?:data|event):/m.test(text),
-                  frameDelimiters: (text.match(/\n\n/g) || []).length,
-                });
-              }
-            }
-            relay('stream-complete', { chunkCount, totalBytesApprox: totalChars });
-          } catch (e) {
-            relay('error', { where: 'tee spy branch read', message: String(e) });
-          }
-        })();
-
-        response = new Response(uiBranch, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
-      } catch (e) {
-        relay('error', { where: 'tee()', message: String(e) });
-        // If tee() itself throws, return the original response untouched —
-        // better to fail open (redaction skipped) than break ChatGPT's UI.
-      }
+    // Restore placeholders on the way back to the page.
+    //
+    // This replaces an observe-only tee(). The reason is not tidiness: the
+    // Streams Standard specifies that cancelling a duplicated stream means
+    // cancelling BOTH branches, so releasing only the branch we read left
+    // the source running -- the unfixed half of the stop-generating defect.
+    // A pipeThrough chain propagates cancel and error backwards for free.
+    //
+    // Fails open at every step. Non-2xx bodies are skipped (an error
+    // response is not SSE); a frame that will not parse passes through; and
+    // if the chain cannot be constructed at all the original response is
+    // returned, which is exactly today's behaviour.
+    if (response.body && restoreResponses && typeof getMap === 'function') {
+      response = withRestoredBody(response, { getMap, relay, onRestored });
     }
 
     return response;

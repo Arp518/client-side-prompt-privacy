@@ -145,6 +145,13 @@ function buildSandbox(opts) {
     ReadableStream,
     TextEncoder,
     TextDecoder,
+    // The restoration path chains these. Without them in the sandbox the
+    // transform throws, the interceptor fails open, and the suite passes
+    // while silently exercising none of the response path -- which is
+    // exactly what happened the first time this was wired up.
+    TransformStream,
+    TextDecoderStream,
+    TextEncoderStream,
     setTimeout,
     clearTimeout,
     queueMicrotask,
