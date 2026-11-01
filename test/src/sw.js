@@ -28,6 +28,23 @@
 const MSG_SOURCE = 'pii-redact';
 const mapKey = (tabId) => `map:${tabId}`;
 const statsKey = (tabId) => `stats:${tabId}`;
+const pauseKey = (tabId) => `paused:${tabId}`;
+
+/**
+ * Pause is per tab and defaults to OFF, which means masking is on.
+ *
+ * The default matters more than it looks. The interceptor starts before
+ * this value can reach it, so there is a brief window on every page load
+ * where it acts on whatever it assumed. Assuming "paused" would send the
+ * first prompt of that window in the clear; assuming "active" masks a
+ * prompt the user may have wanted raw. The first is a disclosure, the
+ * second is an annoyance the user can see and undo.
+ */
+async function readPaused(tabId) {
+  const key = pauseKey(tabId);
+  const got = await chrome.storage.session.get(key);
+  return got[key] === true;
+}
 
 /** Bound per-tab growth; a runaway page should not fill session storage. */
 const MAX_ENTRIES_PER_TAB = 1000;
@@ -58,8 +75,20 @@ async function writeStats(tabId, stats) {
  * a marker, because that is the state the user cannot otherwise see: the
  * reply looks complete but a value is missing from it.
  */
-async function updateBadge(tabId, stats) {
+async function updateBadge(tabId, stats, pausedHint) {
   try {
+    const paused = pausedHint === undefined ? await readPaused(tabId) : pausedHint;
+
+    // Paused outranks the count. A tab that is not masking must say so on
+    // the icon, because that is the only signal visible without opening
+    // the popup, and a stale number there would imply protection that is
+    // switched off.
+    if (paused) {
+      await chrome.action.setBadgeText({ tabId, text: 'off' });
+      await chrome.action.setBadgeBackgroundColor({ tabId, color: '#b45309' });
+      return;
+    }
+
     const n = stats.substituted || 0;
     await chrome.action.setBadgeText({ tabId, text: n ? String(n) : '' });
     if (n) {
@@ -128,6 +157,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'vault-read':
           sendResponse({ ok: true, map: await readMap(tabId) });
           break;
+
+        // --- pause -------------------------------------------------------
+        //
+        // Stored per tab and pushed to the page, because the interceptor
+        // runs in the page's own realm and has no chrome.* access of its
+        // own. It cannot read this; it has to be told.
+
+        case 'get-pause':
+          sendResponse({ ok: true, paused: await readPaused(tabId) });
+          break;
+
+        case 'set-pause': {
+          const paused = msg.paused === true;
+          await chrome.storage.session.set({ [pauseKey(tabId)]: paused });
+          // Tell the page immediately. If this fails -- no content script
+          // yet, tab closing -- the bridge asks again at its next
+          // handshake, so the state is not lost, only delayed.
+          try {
+            await chrome.tabs.sendMessage(tabId, {
+              source: MSG_SOURCE, kind: 'pause-changed', paused,
+            });
+          } catch (e) { /* page not ready; it will ask on load */ }
+          await updateBadge(tabId, await readStats(tabId), paused);
+          sendResponse({ ok: true, paused });
+          break;
+        }
 
         case 'vault-tokens':
           // Placeholder names without the values behind them. The popup

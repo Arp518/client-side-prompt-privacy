@@ -69,6 +69,35 @@ function messagePartsAdapter(frame) {
 }
 
 /**
+ * ChatGPT streaming delta shape: { choices: [{ delta: { content: "..." } }] }.
+ *
+ * This is the primary shape used by ChatGPT's /backend-api/f/conversation
+ * endpoint for incremental reply tokens. Each SSE frame carries one or more
+ * choices, each with a `delta` object whose `content` field holds the text
+ * fragment for that frame.
+ *
+ * This adapter MUST be listed before deepStringAdapter (and before the
+ * generic adapters) so the buffer never receives metadata strings like `id`
+ * or `object`. If those reach the stateful detokenize buffer while a partial
+ * token is held, the buffer splices the held prefix onto the first non-content
+ * string it encounters, corrupting both that field and losing the token.
+ */
+function choicesDeltaContentAdapter(frame) {
+  const out = [];
+  if (!frame || !Array.isArray(frame.choices)) return out;
+  frame.choices.forEach((choice, ci) => {
+    if (choice && choice.delta && typeof choice.delta.content === 'string') {
+      out.push({
+        path: `choices[${ci}].delta.content`,
+        get: () => choice.delta.content,
+        set: (value) => { choice.delta.content = value; },
+      });
+    }
+  });
+  return out;
+}
+
+/**
  * Nested delta: { v: { message: { content: { parts: [...] } } } }.
  */
 function nestedMessagePartsAdapter(frame) {
@@ -141,6 +170,7 @@ function deepStringAdapter(frame, maxDepth = 8) {
 
 /** Specific shapes first; the deep walk only if none matched. */
 const ADAPTERS = [
+  choicesDeltaContentAdapter, // ChatGPT streaming: choices[].delta.content — MUST be first
   deltaValueAdapter,
   nestedMessagePartsAdapter,
   messagePartsAdapter,
@@ -152,19 +182,25 @@ const ADAPTERS = [
  * @returns {Array<{path: string, get(): string, set(value: string): void}>}
  */
 function findTextLocations(parsedFrame, onError) {
-  const all = [];
+  // Try specific adapters in priority order. Stop at the first one that
+  // returns results — running multiple specific adapters on the same frame
+  // would pass the same or overlapping text through the stateful detokenize
+  // buffer more than once, which corrupts the held-prefix state.
   for (const adapter of ADAPTERS) {
     try {
       const found = adapter(parsedFrame);
-      if (Array.isArray(found) && found.length) all.push(...found);
+      if (Array.isArray(found) && found.length) return found;
     } catch (e) {
       if (typeof onError === 'function') {
         onError(adapter.name || 'anonymous-adapter', String(e));
       }
     }
   }
-  if (all.length) return all;
 
+  // No specific adapter matched — fall back to a full deep walk. Safe here
+  // because a placeholder can only appear in a string field that carries
+  // text we originally sent, so restoring inside an unrecognised field is a
+  // no-op at worst, never a corruption.
   try {
     return deepStringAdapter(parsedFrame);
   } catch (e) {
@@ -173,4 +209,4 @@ function findTextLocations(parsedFrame, onError) {
   }
 }
 
-module.exports = { findTextLocations, ADAPTERS, deepStringAdapter };
+module.exports = { findTextLocations, ADAPTERS, deepStringAdapter, choicesDeltaContentAdapter };

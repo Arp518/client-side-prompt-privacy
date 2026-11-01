@@ -10,7 +10,7 @@
 
 'use strict';
 
-function initVaultClient({ relay }) {
+function initVaultClient({ relay, onControl }) {
   let vaultPort = null;
   const pendingVaultDeltas = [];
 
@@ -40,6 +40,22 @@ function initVaultClient({ relay }) {
 
     vaultPort = port;
     window.removeEventListener('message', onHandshake);
+
+    // The port is bidirectional, and it is the only channel into this
+    // realm that a page script cannot read or write. Control messages --
+    // at present only the pause state -- travel back along it for exactly
+    // that reason: sent over window.postMessage they could be both read
+    // and forged by the page, and a forged "paused" would silently
+    // disable masking while the interface still reported it active.
+    port.onmessage = (event) => {
+      const m = event && event.data;
+      if (!m || typeof m.kind !== 'string') return;
+      try {
+        if (typeof onControl === 'function') onControl(m);
+      } catch (e) {
+        relay('error', { where: 'vault port control', message: String(e) });
+      }
+    };
 
     while (pendingVaultDeltas.length) {
       sendVaultDelta(pendingVaultDeltas.shift());

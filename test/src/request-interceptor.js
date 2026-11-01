@@ -73,6 +73,10 @@ function installFetchInterceptor({
   getMap,
   restoreResponses = true,
   onRestored,
+  // Read per request, not captured once. Pause arrives from the interface
+  // after the page has already loaded, so a value sampled at install time
+  // would be permanently stale.
+  isPaused = () => false,
 }) {
   const originalFetch = window.fetch.bind(window);
 
@@ -100,7 +104,15 @@ function installFetchInterceptor({
         rawBodyText = init.body;
       }
 
-      if (rawBodyText && mutateBody) {
+      // Pause suppresses masking only. Restoration below still runs, so
+      // placeholders minted before the pause are still put back into
+      // replies -- otherwise pausing would leave the user reading raw
+      // markers from earlier turns, which looks like a fault rather than
+      // a setting.
+      const paused = isPaused();
+      if (paused) relay('send-paused', {});
+
+      if (rawBodyText && mutateBody && !paused) {
         const { mutated, bodyText } = mutateBodyText(rawBodyText);
         if (mutated) {
           if (input instanceof Request) {
@@ -123,9 +135,12 @@ function installFetchInterceptor({
             finalInit = Object.assign({}, init, { body: bodyText });
           }
         }
-      } else if (rawBodyText) {
-        // Observation-only mode
-        mutateBodyText(rawBodyText); // still relays body-received/body-mutated metadata, just discards the rewrite
+      } else if (rawBodyText && !paused) {
+        // Observation-only mode: still relays shape and count metadata,
+        // just discards the rewrite. Skipped while paused, because running
+        // the detector here would report "7 substituted" for a request
+        // that in fact went out untouched.
+        mutateBodyText(rawBodyText);
       }
     } catch (e) {
       relay('error', { where: 'pre-fetch mutation', message: String(e) });
