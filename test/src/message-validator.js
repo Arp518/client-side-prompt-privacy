@@ -33,6 +33,7 @@ const ALLOWED_KINDS = new Set([
   'response-status',
   'possible-rejection',
   'stream-chunk-shape',
+  'restoration-complete',
   'stream-complete',
   'vault-channel-open',
   'unintercepted-transport',
@@ -71,6 +72,17 @@ const KIND_VALIDATORS = {
     typeof p?.chunkCount === 'number' &&
     typeof p?.bytes === 'number' &&
     typeof p?.looksLikeSse === 'boolean',
+
+  // Counts only. The interface reads these to report how many markers the
+  // model gave back; any field carrying reply text would be rejected here
+  // before it could reach storage.
+  'restoration-complete': (p) =>
+    typeof p?.framesSeen === 'number' &&
+    typeof p?.restored === 'number' &&
+    typeof p?.unreturned === 'number' &&
+    (p?.restoredTokens === undefined ||
+      (Array.isArray(p.restoredTokens) &&
+        p.restoredTokens.every((t) => typeof t === 'string' && /^\[[A-Z0-9_]+\]$/.test(t)))),
   'stream-complete': (p) =>
     typeof p?.chunkCount === 'number' && typeof p?.totalBytesApprox === 'number',
   'vault-channel-open': (p) => typeof p === 'object' && p !== null,

@@ -35,5 +35,13 @@
   ],
   "background": {
     "service_worker": "src/sw.js"
+  },
+  "action": {
+    "default_popup": "ui/popup.html",
+    "default_title": "Prompt Privacy"
+  },
+  "options_ui": {
+    "page": "ui/options.html",
+    "open_in_tab": true
   }
 }

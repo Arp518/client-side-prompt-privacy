@@ -209,6 +209,29 @@ window.addEventListener("message", (event) => {
     offerVaultPort();
   }
 
+  // Forward the two counting events to the worker, which owns per-tab
+  // state and the toolbar badge. These travel on the ordinary bridge
+  // rather than the private port because they carry no values: a
+  // replacement count and a type histogram, both of which already cross
+  // this channel in body-mutated. The validator has already checked their
+  // shape by this point.
+  if (msg.kind === "body-mutated") {
+    forwardToWorker({
+      source: "pii-redact",
+      kind: "turn-recorded",
+      replacements: msg.payload.replacements,
+      byType: msg.payload.matchTypeCounts || msg.payload.typesFound || {},
+    });
+  } else if (msg.kind === "restoration-complete") {
+    forwardToWorker({
+      source: "pii-redact",
+      kind: "restoration-recorded",
+      restored: msg.payload.restored,
+      unreturned: msg.payload.unreturned,
+      restoredTokens: msg.payload.restoredTokens || [],
+    });
+  }
+
   console.log(
     `${LOG_PREFIX} [${msg.kind}]`,
     msg.payload

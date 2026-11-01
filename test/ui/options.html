@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Prompt Privacy — vault</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1>Prompt Privacy</h1>
+    <div class="sub" id="version">research prototype</div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-view="vault" role="tab">Vault</button>
+    <button class="tab" data-view="audit" role="tab">Audit Log</button>
+    <button class="tab" data-view="settings" role="tab">Settings</button>
+    <button class="tab" data-view="about" role="tab">About</button>
+  </nav>
+</header>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="view" id="view-vault">
+
+  <div class="toolbar">
+    <label class="field">
+      <span>Tab</span>
+      <select id="tabPicker"></select>
+    </label>
+    <button class="btn tiny" id="refreshTabs" title="Refresh open tab list">Refresh tabs</button>
+    <div class="spacer"></div>
+    <span class="count" id="vaultCount"></span>
+    <button class="btn danger" id="clearVault">Clear this tab</button>
+  </div>
+
+  <div class="banner" id="presentationBanner" hidden>
+    Presentation mode is on. Values cannot be revealed.
+  </div>
+
+  <table class="tbl" id="vaultTable" hidden>
+    <thead>
+      <tr>
+        <th>Placeholder</th>
+        <th>Type</th>
+        <th>Stored value</th>
+        <th>Status</th>
+        <th class="right">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="vaultBody"></tbody>
+  </table>
+
+  <p class="empty" id="vaultEmpty">
+    Nothing stored for this tab. Values appear here once something has been
+    detected and substituted in a prompt.
+  </p>
+
+  <p class="footnote">
+    Values are held in session storage on this device and are cleared when
+    the tab closes. They are not encrypted at rest, and they are never sent
+    anywhere &mdash; displaying one here does not transmit it.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="view" id="view-audit" hidden>
+  <div class="toolbar">
+    <div class="spacer"></div>
+    <span class="count" id="auditCount"></span>
+    <button class="btn tiny" id="refreshAudit">Refresh log</button>
+    <button class="btn tiny danger" id="clearAudit">Clear audit log</button>
+  </div>
+
+  <table class="tbl" id="auditTable" hidden>
+    <thead>
+      <tr>
+        <th style="width: 140px;">Timestamp</th>
+        <th style="width: 160px;">Event Kind</th>
+        <th>Recorded Metadata (Counts / Types Only)</th>
+      </tr>
+    </thead>
+    <tbody id="auditBody"></tbody>
+  </table>
+
+  <p class="empty" id="auditEmpty">
+    No events recorded in this browser session. Events are logged here as prompts are intercepted.
+  </p>
+
+  <p class="footnote">
+    The persistent event log (phase0_log) is capped at 200 entries and stored locally. It records
+    event kinds, counts, and type distributions only. Prompt text, reply text, and raw sensitive
+    values are strictly excluded.
+  </p>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="view" id="view-settings" hidden>
+
+  <div class="setting">
+    <div>
+      <div class="setting-name">Presentation mode</div>
+      <p class="setting-help">
+        Prevents stored values from being revealed at all. Turn this on
+        before screen-sharing, recording or presenting, so a value cannot be
+        exposed by a stray click.
+      </p>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="presentationMode">
+      <span></span>
+    </label>
+  </div>
+
+  <div class="setting">
+    <div>
+      <div class="setting-name">Clear all stored values</div>
+      <p class="setting-help">
+        Removes every placeholder mapping for every tab, and the counters
+        shown in the popup. Placeholders already sent in a conversation
+        cannot be restored afterwards.
+      </p>
+    </div>
+    <button class="btn danger" id="clearAll">Clear everything</button>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="view" id="view-about" hidden>
+
+  <h2>What this does</h2>
+  <p>
+    Personal information is detected in the prompt and replaced with a
+    placeholder before the request leaves this machine. The original values
+    are kept locally so they can be put back into the reply. The service
+    receives only the placeholder.
+  </p>
+
+  <h2>What it does not do</h2>
+  <ul class="limits">
+    <li>
+      <strong>It does not detect everything.</strong> Only the listed types
+      are matched, by pattern. Anything unrecognised is sent unchanged, and
+      no measurement here bounds how much that is.
+    </li>
+    <li>
+      <strong>The page could observe the extension.</strong> Intercepting
+      the request requires running in the page's own JavaScript
+      environment. A script that loaded first could in principle watch the
+      handover. This cannot be eliminated on this extension platform.
+    </li>
+    <li>
+      <strong>Stored values are not encrypted.</strong> They are in session
+      storage in the clear until the tab closes.
+    </li>
+    <li>
+      <strong>Restoration depends on the model.</strong> If the model does
+      not repeat a placeholder, the value cannot be put back. The popup
+      reports when that happens.
+    </li>
+  </ul>
+
+  <h2>Detection accuracy</h2>
+  <p class="muted small" id="metricsNote">loading measured figures…</p>
+  <table class="tbl compact" id="metricsTable" hidden>
+    <thead>
+      <tr><th>Type</th><th class="right">Precision</th><th class="right">Recall</th><th class="right">F1</th></tr>
+    </thead>
+    <tbody id="metricsBody"></tbody>
+  </table>
+  <p class="footnote" id="metricsCaveat" hidden></p>
+</section>
+
+<script src="options.js"></script>
+</body>
+</html>

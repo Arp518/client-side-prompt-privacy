@@ -27,9 +27,51 @@
 
 const MSG_SOURCE = 'pii-redact';
 const mapKey = (tabId) => `map:${tabId}`;
+const statsKey = (tabId) => `stats:${tabId}`;
 
 /** Bound per-tab growth; a runaway page should not fill session storage. */
 const MAX_ENTRIES_PER_TAB = 1000;
+
+/**
+ * Per-tab counters for the interface. Deliberately separate from the vault:
+ * the vault holds values and must be read sparingly, whereas the popup
+ * polls these on every open. Counts and type names only -- nothing here is
+ * derived from the content of a prompt or a reply.
+ */
+async function readStats(tabId) {
+  const key = statsKey(tabId);
+  const got = await chrome.storage.session.get(key);
+  const v = got[key];
+  return (v && typeof v === 'object')
+    ? v
+    : { substituted: 0, byType: {}, restored: 0, unreturned: 0, turns: 0 };
+}
+
+async function writeStats(tabId, stats) {
+  await chrome.storage.session.set({ [statsKey(tabId)]: stats });
+  await updateBadge(tabId, stats);
+  return stats;
+}
+
+/**
+ * Ambient signal on the toolbar icon. Amber when the model failed to return
+ * a marker, because that is the state the user cannot otherwise see: the
+ * reply looks complete but a value is missing from it.
+ */
+async function updateBadge(tabId, stats) {
+  try {
+    const n = stats.substituted || 0;
+    await chrome.action.setBadgeText({ tabId, text: n ? String(n) : '' });
+    if (n) {
+      await chrome.action.setBadgeBackgroundColor({
+        tabId,
+        color: stats.unreturned > 0 ? '#b45309' : '#3f3f46',
+      });
+    }
+  } catch (e) {
+    // A tab can close between the write and the badge update; not an error.
+  }
+}
 
 async function readMap(tabId) {
   const key = mapKey(tabId);
@@ -59,11 +101,19 @@ async function mergeDelta(tabId, delta) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.source !== MSG_SOURCE) return undefined;
 
-  // Messages from the popup have no sender.tab; they must name the tab.
+  // Messages from the popup and options page have no sender.tab; they must
+  // name the tab themselves.
   const tabId =
     sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : msg.tabId;
 
-  if (typeof tabId !== 'number') {
+  // A few operations are deliberately tab-independent. Requiring a tab id
+  // for those rejected them before the switch ever ran, so "clear
+  // everything" returned an error the page ignored and the button appeared
+  // to do nothing at all -- the worst outcome for a destructive control,
+  // since the user believes their data is gone.
+  const TAB_INDEPENDENT = new Set(['vault-clear-all']);
+
+  if (!TAB_INDEPENDENT.has(msg.kind) && typeof tabId !== 'number') {
     sendResponse({ ok: false, error: 'no tab id' });
     return true;
   }
@@ -77,6 +127,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         case 'vault-read':
           sendResponse({ ok: true, map: await readMap(tabId) });
+          break;
+
+        case 'vault-tokens':
+          // Placeholder names without the values behind them. The popup
+          // needs to name which markers the model failed to return, and
+          // that is the whole of what it needs; reading the full map there
+          // would pull every stored secret into a surface that has no use
+          // for one. Least privilege, and it keeps the popup's documented
+          // invariant -- that no value is ever present in that document --
+          // actually true.
+          sendResponse({ ok: true, tokens: Object.keys(await readMap(tabId)) });
+          break;
+
+        // --- interface counters -------------------------------------------
+
+        case 'turn-recorded': {
+          // One send completed. msg.byType is the type histogram the
+          // interceptor already relays; no content accompanies it.
+          const stats = await readStats(tabId);
+          stats.turns += 1;
+          stats.substituted += Number(msg.replacements) || 0;
+          for (const [type, n] of Object.entries(msg.byType || {})) {
+            if (typeof type === 'string' && Number.isFinite(n)) {
+              stats.byType[type] = (stats.byType[type] || 0) + n;
+            }
+          }
+          sendResponse({ ok: true, ...(await writeStats(tabId, stats)) });
+          break;
+        }
+
+        case 'restoration-recorded': {
+          // Absolute figures for the session, not increments: the
+          // transform reports against the whole map each time, so adding
+          // them would double count across turns.
+          const stats = await readStats(tabId);
+          stats.restored = Number(msg.restored) || 0;
+          stats.unreturned = Number(msg.unreturned) || 0;
+          if (Array.isArray(msg.restoredTokens)) {
+            stats.restoredTokens = msg.restoredTokens;
+          }
+          sendResponse({ ok: true, ...(await writeStats(tabId, stats)) });
+          break;
+        }
+
+        case 'ui-stats':
+          sendResponse({ ok: true, stats: await readStats(tabId) });
           break;
 
         case 'vault-stats': {
@@ -94,14 +190,46 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'vault-delete': {
           const map = await readMap(tabId);
           const existed = Object.prototype.hasOwnProperty.call(map, msg.token);
-          delete map[msg.token];
-          await chrome.storage.session.set({ [mapKey(tabId)]: map });
+          if (existed) {
+            delete map[msg.token];
+            await chrome.storage.session.set({ [mapKey(tabId)]: map });
+
+            // Keep counters and badge in sync with the vault contents
+            const stats = await readStats(tabId);
+            if (stats.substituted > 0) stats.substituted -= 1;
+            const m = /^\[([A-Z][A-Z0-9_]*)_PLACEHOLDER_\d+\]$/.exec(msg.token);
+            if (m && stats.byType && stats.byType[m[1]]) {
+              stats.byType[m[1]] -= 1;
+              if (stats.byType[m[1]] <= 0) delete stats.byType[m[1]];
+            }
+            if (Array.isArray(stats.restoredTokens)) {
+              stats.restoredTokens = stats.restoredTokens.filter((t) => t !== msg.token);
+            }
+            await writeStats(tabId, stats);
+          }
           sendResponse({ ok: true, deleted: existed });
           break;
         }
 
         case 'vault-clear':
-          await chrome.storage.session.remove(mapKey(tabId));
+          // Counters go with the values. Leaving "7 protected" on screen
+          // after the vault is empty would misstate what the extension
+          // still holds.
+          await chrome.storage.session.remove([mapKey(tabId), statsKey(tabId)]);
+          await updateBadge(tabId, { substituted: 0, unreturned: 0 });
+          sendResponse({ ok: true });
+          break;
+
+        case 'vault-clear-all':
+          await chrome.storage.session.clear();
+          try {
+            const tabs = await chrome.tabs.query({
+              url: ['https://chatgpt.com/*', 'https://chat.openai.com/*'],
+            });
+            for (const t of tabs) {
+              await chrome.action.setBadgeText({ tabId: t.id, text: '' });
+            }
+          } catch (e) { /* ignore tab query errors */ }
           sendResponse({ ok: true });
           break;
 
@@ -119,5 +247,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Drop a tab's values as soon as it closes, rather than waiting for the
 // whole browser session to end. Works without the "tabs" permission.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.storage.session.remove(mapKey(tabId)).catch(() => { });
+  chrome.storage.session.remove([mapKey(tabId), statsKey(tabId)]).catch(() => { });
 });

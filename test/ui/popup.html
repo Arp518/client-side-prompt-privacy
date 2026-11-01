@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Prompt Privacy</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+<header class="hdr">
+  <div>
+    <div class="brand">Prompt Privacy</div>
+    <div class="scope" id="scope">checking this tab…</div>
+  </div>
+  <div class="hdr-right">
+    <span class="status" id="status"><i class="dot" id="dot"></i><span id="statusText">…</span></span>
+  </div>
+</header>
+
+<!-- Shown only when this tab is not a supported page. -->
+<section class="pane" id="inactivePane" hidden>
+  <p class="muted">
+    This extension only acts on supported chat pages. Nothing is being
+    intercepted in this tab.
+  </p>
+</section>
+
+<div id="activePanes" hidden>
+
+  <section class="pane">
+    <h2>This conversation</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="card-label">Substituted</div>
+        <div class="card-value" id="substituted">0</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Restored in replies</div>
+        <div class="card-value"><span id="restored">0</span><span class="of" id="restoredOf"></span></div>
+      </div>
+    </div>
+
+    <div class="bar" id="bar" hidden>
+      <div class="bar-restored" id="barRestored"></div>
+      <div class="bar-unreturned" id="barUnreturned"></div>
+    </div>
+    <div class="legend" id="legend" hidden>
+      <span id="legendRestored"></span>
+      <span id="legendUnreturned"></span>
+    </div>
+  </section>
+
+  <section class="pane" id="typesPane" hidden>
+    <h2>By type</h2>
+    <div id="types"></div>
+  </section>
+
+  <!-- Only rendered when the model actually failed to return a marker. -->
+  <section class="pane" id="unreturnedPane" hidden>
+    <div class="note">
+      <div class="note-title" id="noteTitle"></div>
+      <p>
+        The model did not return these placeholders, so those values could
+        not be put back into the reply. The values were never transmitted
+        and remain only on this device.
+      </p>
+      <div class="unreturned-list" id="unreturnedList"></div>
+    </div>
+  </section>
+
+  <section class="pane">
+    <h2>What this does not do</h2>
+    <p class="muted small">
+      Only the listed types are detected; anything the detector does not
+      recognise is sent unchanged. The interception point shares the page's
+      JavaScript environment, so a script on the page could in principle
+      observe it. Stored values are not encrypted.
+    </p>
+  </section>
+
+</div>
+
+<footer class="ftr">
+  <button class="btn wide" id="vaultBtn">Open vault</button>
+  <button class="btn danger" id="clearBtn">Clear tab</button>
+</footer>
+
+<script src="popup.js"></script>
+</body>
+</html>

@@ -133,13 +133,39 @@ function restoreFrame(raw, buffer, relay) {
  * @param {(token: string) => void} [opts.onRestored]
  */
 function createRestorationTransform({ getMap, relay, tolerant = false, onRestored }) {
-  const buffer = createDetokenizeBuffer({ getMap, tolerant, onRestored });
+  // Distinct markers actually restored in this response. Counted here
+  // rather than by the caller so the completion event carries a number the
+  // interface can show without the caller having to track it. Tokens only,
+  // never values -- this count crosses the page-readable channel.
+  const restored = new Set();
+  const countAndForward = (token) => {
+    restored.add(token);
+    if (onRestored) onRestored(token);
+  };
+
+  const buffer = createDetokenizeBuffer({ getMap, tolerant, onRestored: countAndForward });
   const assembler = createFrameAssembler();
   let framesSeen = 0;
+  let chunkCount = 0;
 
   return new TransformStream({
     transform(chunk, controller) {
       try {
+        chunkCount++;
+        if (chunkCount <= 3 && relay) {
+          // Format drift detection, carried over from the tee() spy branch
+          // this transform replaced. Without it, a response that stops
+          // being SSE fails silently: the assembler finds no delimiters,
+          // every frame passes through untouched, and the user sees raw
+          // placeholders with nothing anywhere reporting that restoration
+          // has stopped working. Shape only -- no reply text.
+          relay('stream-chunk-shape', {
+            chunkCount,
+            bytes: chunk.length,
+            looksLikeSse: /^(?:data|event):/m.test(chunk),
+            frameDelimiters: (chunk.match(/\n\n/g) || []).length,
+          });
+        }
         for (const frame of assembler.push(chunk)) {
           framesSeen++;
           const out = restoreFrame(frame.raw, buffer, relay);
@@ -161,7 +187,22 @@ function createRestorationTransform({ getMap, relay, tolerant = false, onRestore
         // text is worse.
         const tail = buffer.flush();
         if (tail) controller.enqueue(tail);
-        if (relay) relay('restoration-complete', { framesSeen });
+        if (relay) {
+          // "sent" is how many markers the session holds in total, so
+          // sent - restored is how many the model did not give back. That
+          // difference is the number the interface must surface honestly:
+          // a reply missing a placeholder is incomplete, and the user is
+          // entitled to know rather than be shown a plausible-looking
+          // answer with a value silently absent.
+          const sent = Object.keys(getMap() || {}).length;
+          relay('restoration-complete', {
+            framesSeen,
+            restored: restored.size,
+            sent,
+            unreturned: Math.max(0, sent - restored.size),
+            restoredTokens: Array.from(restored),
+          });
+        }
       } catch (e) {
         if (relay) relay('error', { where: 'restoration flush', message: String(e) });
       }
