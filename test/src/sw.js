@@ -221,6 +221,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           stats.unreturned = Number(msg.unreturned) || 0;
           if (Array.isArray(msg.restoredTokens)) {
             stats.restoredTokens = msg.restoredTokens;
+
+            // Name the markers that were in the vault when this reply
+            // finished and did not come back in it.
+            //
+            // Recorded as a SET rather than left for the interface to
+            // infer, because the inference it was making is wrong: given
+            // only a count, "unreturned > 0" marks every unrestored token
+            // as missing, including ones minted for a turn whose reply has
+            // not streamed yet. Those are pending, not dropped, and
+            // labelling them a failure invents a result.
+            const live = Object.keys(await readMap(tabId));
+            const back = new Set(msg.restoredTokens);
+            stats.unreturnedTokens = live.filter((t) => !back.has(t));
           }
           sendResponse({ ok: true, ...(await writeStats(tabId, stats)) });
           break;
@@ -257,8 +270,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               stats.byType[m[1]] -= 1;
               if (stats.byType[m[1]] <= 0) delete stats.byType[m[1]];
             }
-            if (Array.isArray(stats.restoredTokens)) {
-              stats.restoredTokens = stats.restoredTokens.filter((t) => t !== msg.token);
+            for (const field of ['restoredTokens', 'unreturnedTokens']) {
+              if (Array.isArray(stats[field])) {
+                stats[field] = stats[field].filter((t) => t !== msg.token);
+              }
             }
             await writeStats(tabId, stats);
           }
@@ -302,5 +317,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Drop a tab's values as soon as it closes, rather than waiting for the
 // whole browser session to end. Works without the "tabs" permission.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  chrome.storage.session.remove([mapKey(tabId), statsKey(tabId)]).catch(() => { });
+  // The pause flag goes with them. Chrome does reuse tab ids within a
+  // session, and a pause that outlived its tab would silently switch
+  // masking off for whatever opened next -- a stale setting that disables
+  // the protection is the one kind of leftover state that must not happen.
+  chrome.storage.session
+    .remove([mapKey(tabId), statsKey(tabId), pauseKey(tabId)])
+    .catch(() => { });
 });

@@ -50,8 +50,33 @@
   // numbering is monotonic across turns and repeated values keep their token.
   const tokenSession = createTokenSession();
 
+  /**
+   * Whether masking is switched off for this tab.
+   *
+   * Starts false — masking ON — and that direction is deliberate. The
+   * interceptor is live before the real setting can arrive from the
+   * service worker, so there is a short window on every page load where it
+   * acts on this assumption. Assuming "paused" would send the first prompt
+   * of that window in the clear; assuming "active" masks a prompt the user
+   * may have wanted raw. The first is a disclosure the user cannot undo,
+   * the second is an annoyance they can see and fix.
+   *
+   * It arrives over the PRIVATE port, never window.postMessage. A forged
+   * "paused" on a page-readable channel would switch masking off while the
+   * interface went on reporting it active, which is the one lie this
+   * extension must not tell.
+   */
+  let maskingPaused = false;
+
   // Private channel to transfer token map deltas securely to the isolated world
-  const { sendVaultDelta } = initVaultClient({ relay });
+  const { sendVaultDelta } = initVaultClient({
+    relay,
+    onControl: (msg) => {
+      if (msg.kind === 'pause' && typeof msg.paused === 'boolean') {
+        maskingPaused = msg.paused;
+      }
+    },
+  });
 
   // Which markers the model actually gave back. Tokens only, never values.
   // Compared against the session map, this is what lets the interface
@@ -83,6 +108,11 @@
     onRestored: (token) => {
       restoredTokens.add(token);
     },
+
+    // Read per request, not captured once: the setting arrives after the
+    // page has already loaded, so a value sampled at install time would be
+    // permanently stale.
+    isPaused: () => maskingPaused,
   });
 
   installTransportCanary({

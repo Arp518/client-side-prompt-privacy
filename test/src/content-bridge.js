@@ -141,13 +141,24 @@ window.addEventListener("pagehide", flushLog);
  * inject.js for the residual risk this does not eliminate.
  * ========================================================== */
 
-let vaultPortOffered = false;
+let vaultChannelOpened = false;
+
+/**
+ * Our end of the private channel, kept so control messages can be pushed
+ * INTO the MAIN world rather than only received from it.
+ *
+ * Pause travels this way and not over window.postMessage, because that
+ * channel is readable and writable by any script sharing the page's JS
+ * context. A forged "paused" there would switch masking off silently while
+ * the popup and the toolbar badge went on reporting it active.
+ */
+let vaultPort = null;
 
 function offerVaultPort() {
-  if (vaultPortOffered) return;
-  vaultPortOffered = true;
+  if (vaultChannelOpened) return;
 
   const channel = new MessageChannel();
+  vaultPort = channel.port1;
 
   channel.port1.onmessage = (event) => {
     const msg = event.data;
@@ -159,12 +170,60 @@ function offerVaultPort() {
     });
   };
 
-  window.postMessage(
-    { source: "pii-redact-port-offer" },
-    window.location.origin,
-    [channel.port2]
-  );
+  const targetOrigin =
+    (!window.location.origin || window.location.origin === 'null')
+      ? '*'
+      : window.location.origin;
+
+  try {
+    window.postMessage(
+      { source: "pii-redact-port-offer" },
+      targetOrigin,
+      [channel.port2]
+    );
+  } catch (e) {
+    try {
+      window.postMessage({ source: "pii-redact-port-offer" }, "*", [channel.port2]);
+    } catch (err) { /* ignore */ }
+  }
 }
+
+/**
+ * Push the current pause state into the MAIN world.
+ *
+ * The interceptor runs in the page's own realm and has no chrome.* access,
+ * so it cannot read this setting — it has to be told, on every page load
+ * and again whenever it changes. Without this the service worker stores a
+ * pause that nothing acts on: the badge reads "off" while masking carries
+ * on, which claims the protection is disabled when it is not.
+ */
+async function pushPauseState() {
+  if (contextInvalidated || !vaultPort) return;
+  try {
+    const reply = await chrome.runtime.sendMessage({
+      source: 'pii-redact', kind: 'get-pause',
+    });
+    if (reply && reply.ok) {
+      vaultPort.postMessage({ kind: 'pause', paused: reply.paused === true });
+    }
+  } catch (e) {
+    if (String(e).includes('Extension context invalidated')) contextInvalidated = true;
+  }
+}
+
+// The worker pushes this the moment the user toggles the control, so the
+// next request is masked (or not) without waiting for a reload.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.source !== 'pii-redact') return;
+  if (msg.kind !== 'pause-changed') return;
+  if (vaultPort) {
+    try {
+      vaultPort.postMessage({ kind: 'pause', paused: msg.paused === true });
+    } catch (e) {
+      console.warn(`${LOG_PREFIX} could not deliver pause state`, e);
+    }
+  }
+});
 
 function forwardToWorker(message) {
   if (contextInvalidated) return;
@@ -205,7 +264,13 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
 
   // inject.js loaded after us and missed the port offer -- re-offer.
-  if (msg.kind === "injector-ready" && !vaultPortOffered) {
+  if (msg.kind === "vault-channel-open") {
+    vaultChannelOpened = true;
+    // The MAIN world is listening now, so this is the first moment the
+    // pause state can actually be delivered.
+    pushPauseState();
+  }
+  if (msg.kind === "injector-ready" && !vaultChannelOpened) {
     offerVaultPort();
   }
 
@@ -230,6 +295,18 @@ window.addEventListener("message", (event) => {
       unreturned: msg.payload.unreturned,
       restoredTokens: msg.payload.restoredTokens || [],
     });
+    // Invalidate vault map cache so the DOM fallback uses the latest map,
+    // then trigger DOM restoration after a short delay to let the UI settle.
+    vaultMapLastFetched = 0;
+    cachedVaultMap = null;
+    setTimeout(() => {
+      const assistantMsgs = document.querySelectorAll(
+        '[data-message-author-role="assistant"]'
+      );
+      for (const el of assistantMsgs) {
+        tryDomRestoration(el);
+      }
+    }, 500);
   }
 
   console.log(
@@ -523,7 +600,148 @@ function findMessagesInElement(el) {
 
 /* ============================================================
  * DOM FALLBACK OBSERVER
+ *
+ * DUAL PURPOSE:
+ *   1. Logging: records message appearances for diagnostics.
+ *   2. Restoration fallback: if the stream-level restoration fails
+ *      to replace placeholders (e.g. due to model_dil_v2 split tokens
+ *      or CSP fallback rendering), this observer walks assistant
+ *      message text nodes and replaces any remaining placeholders
+ *      with the original values from the vault.
  * ========================================================== */
+
+/** Regex for canonical placeholder tokens in DOM text. */
+const DOM_TOKEN_RE = /\[[A-Z][A-Z0-9_]*_PLACEHOLDER_\d+\]/g;
+
+/**
+ * Cached vault map for DOM-level restoration.  Refreshed periodically
+ * and on every restoration-complete event.
+ */
+let cachedVaultMap = null;
+let vaultMapLastFetched = 0;
+const VAULT_MAP_TTL_MS = 2000;
+
+async function refreshVaultMap() {
+  if (contextInvalidated) return null;
+  const now = Date.now();
+  if (cachedVaultMap && (now - vaultMapLastFetched) < VAULT_MAP_TTL_MS) {
+    return cachedVaultMap;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      source: 'pii-redact',
+      kind: 'vault-read',
+    });
+    if (response && response.ok && response.map) {
+      cachedVaultMap = response.map;
+      vaultMapLastFetched = now;
+    }
+  } catch (e) {
+    if (String(e).includes('Extension context invalidated')) {
+      contextInvalidated = true;
+    }
+  }
+  return cachedVaultMap;
+}
+
+/**
+ * Walk all text nodes under `root` and replace placeholder tokens with
+ * original values from the vault map.  Only touches text nodes to avoid
+ * disrupting React's virtual DOM — text node mutations are the safest
+ * DOM change because React does not track individual text node content
+ * for its reconciliation.
+ *
+ * @param {Element} root  the assistant message element
+ * @param {Record<string,string>} map  token → original value
+ * @returns {number} number of replacements made
+ */
+function replaceTokensInDom(root, map) {
+  if (!root || !map) return 0;
+
+  let replacements = 0;
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT,
+    null
+  );
+
+  let node;
+  while ((node = walker.nextNode())) {
+    const text = node.nodeValue;
+    if (!text || !DOM_TOKEN_RE.test(text)) continue;
+    DOM_TOKEN_RE.lastIndex = 0; // reset after test()
+
+    const replaced = text.replace(DOM_TOKEN_RE, (match) => {
+      if (Object.prototype.hasOwnProperty.call(map, match)) {
+        replacements++;
+        return map[match];
+      }
+      return match;
+    });
+
+    if (replaced !== text) {
+      node.nodeValue = replaced;
+    }
+  }
+  return replacements;
+}
+
+/**
+ * Scan an element (and its subtree) for assistant messages containing
+ * placeholder tokens and replace them with vault values.
+ */
+async function tryDomRestoration(el) {
+  if (!(el instanceof Element)) return;
+
+  // Only restore in assistant messages
+  const assistantEls = [];
+  if (el.matches && el.matches('[data-message-author-role="assistant"]')) {
+    assistantEls.push(el);
+  }
+  const closest = el.closest && el.closest('[data-message-author-role="assistant"]');
+  if (closest) assistantEls.push(closest);
+  const descendants = el.querySelectorAll
+    ? el.querySelectorAll('[data-message-author-role="assistant"]')
+    : [];
+  for (const d of descendants) assistantEls.push(d);
+
+  if (assistantEls.length === 0) return;
+
+  // Check if any text contains a placeholder before fetching the map
+  let hasPlaceholder = false;
+  for (const ae of assistantEls) {
+    const text = ae.textContent || '';
+    if (DOM_TOKEN_RE.test(text)) {
+      hasPlaceholder = true;
+      DOM_TOKEN_RE.lastIndex = 0;
+      break;
+    }
+  }
+  if (!hasPlaceholder) return;
+
+  const map = await refreshVaultMap();
+  if (!map || Object.keys(map).length === 0) return;
+
+  const seen = new Set();
+  let totalReplacements = 0;
+  for (const ae of assistantEls) {
+    if (seen.has(ae)) continue;
+    seen.add(ae);
+    totalReplacements += replaceTokensInDom(ae, map);
+  }
+
+  if (totalReplacements > 0) {
+    console.log(
+      `${LOG_PREFIX} [dom-fallback-restored]`,
+      { replacements: totalReplacements }
+    );
+    appendToLog({
+      kind: 'dom-fallback-restored',
+      payload: { replacements: totalReplacements },
+      ts: Date.now(),
+    });
+  }
+}
 
 function startDomFallbackObserver() {
 
@@ -544,6 +762,7 @@ function startDomFallbackObserver() {
 
   let mutationCount = 0;
   let loggedTextCount = 0;
+  let domRestorationTimer = null;
 
 
   /*
@@ -773,6 +992,21 @@ function startDomFallbackObserver() {
           }
         );
       }
+
+      // Debounced DOM-level restoration fallback.  During streaming,
+      // mutations fire hundreds of times.  We defer restoration until
+      // the burst settles (300ms quiet), which typically means the end
+      // of a streaming response or a large DOM update.
+      if (domRestorationTimer !== null) clearTimeout(domRestorationTimer);
+      domRestorationTimer = setTimeout(() => {
+        domRestorationTimer = null;
+        const assistantMsgs = document.querySelectorAll(
+          '[data-message-author-role="assistant"]'
+        );
+        for (const el of assistantMsgs) {
+          tryDomRestoration(el);
+        }
+      }, 300);
     });
 
 

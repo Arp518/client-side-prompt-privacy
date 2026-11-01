@@ -22,6 +22,13 @@
  * appends deltas — a few characters arrive one frame later than they
  * otherwise would, which is imperceptible.
  *
+ * That trick is valid ONLY for fields that accumulate by appending. The
+ * same reply also travels in a cumulative field, where each frame restates
+ * the whole text so far, and carrying a tail into one of those prepends a
+ * stray fragment to the front of the entire string. Hence one buffer per
+ * APPEND path, keyed by location.key, and no buffer at all for whole
+ * values. See response-adapters.js for which is which.
+ *
  * FAIL OPEN throughout. A frame that will not parse is passed through
  * untouched; an adapter that finds no text location leaves the frame alone;
  * a transform that throws during construction leaves the response as it
@@ -31,8 +38,8 @@
 
 'use strict';
 
-const { createDetokenizeBuffer } = require('./detokenize-buffer');
-const { findTextLocations } = require('./response-adapters');
+const { createDetokenizeBuffer, restoreAll } = require('./detokenize-buffer');
+const { findTextLocations, reescapeMarkdown } = require('./response-adapters');
 
 /** Frame delimiter. Server-sent events separate records with a blank line. */
 const FRAME_DELIMITER = '\n\n';
@@ -76,17 +83,52 @@ function createFrameAssembler() {
 }
 
 /**
+ * Does this frame end the assistant's text?
+ *
+ * Needed so withheld tails can be released INSIDE the stream rather than
+ * after it. A hold-back buffer can still be holding a few characters when
+ * the reply ends — the last thing the model wrote looked like the start of
+ * a marker. Those characters have to go somewhere, and the two obvious
+ * options are both wrong: dropping them silently truncates the reply, and
+ * enqueuing them as bare text injects a line that belongs to no `data:`
+ * frame, which is malformed SSE. Appending them as a further operation on
+ * the frame that closes the turn is the only option that is both lossless
+ * and well-formed.
+ */
+function isTurnTerminal(ops) {
+  if (!Array.isArray(ops)) return false;
+  return ops.some((op) => op && typeof op === 'object' && op.o === 'replace' && (
+    (op.p === '/message/status' && op.v === 'finished_successfully') ||
+    (op.p === '/message/end_turn' && op.v === true)
+  ));
+}
+
+/** Tails are re-encoded for the field they belong to before being emitted. */
+function encoderFor(key) {
+  return key === 'fallbackMarkdown' ? reescapeMarkdown : (text) => text;
+}
+
+/**
  * Restore placeholders inside one frame.
  *
- * @returns {string} the frame, re-serialised if it was modified, or the
- *          original text unchanged if anything about it was unexpected.
+ * @param {string} raw      the raw SSE frame text
+ * @param {Map<string, {buf: object, pointer: string, encode: function}>} buffers
+ *        one hold-back buffer per append path, created lazily and persisting
+ *        across frames so a marker split across deltas is reassembled.
+ * @param {function} makeBuffer  factory for a new hold-back buffer
+ * @param {function} restoreWhole  stateless restore for complete values
+ * @param {function} relay
+ * @returns {string} the frame, re-serialised if it changed, otherwise the
+ *          original text byte for byte.
  */
-function restoreFrame(raw, buffer, relay) {
-  // SSE data lines carry the payload; anything else (event:, id:, retry:,
-  // comments, the [DONE] sentinel) is protocol and passes through.
-  if (!raw.startsWith('data:')) return raw;
+function restoreFrame(raw, buffers, makeBuffer, restoreWhole, relay) {
+  // An SSE record may carry `event:` or `id:` lines before `data:`; keep
+  // them untouched and operate only on the payload line.
+  const lines = raw.split(/\r?\n/);
+  const dataIdx = lines.findIndex((l) => l.startsWith('data:'));
+  if (dataIdx === -1) return raw;
 
-  const body = raw.slice(5).trim();
+  const body = lines[dataIdx].slice(5).trim();
   if (body === '' || body === '[DONE]') return raw;
 
   let parsed;
@@ -104,20 +146,54 @@ function restoreFrame(raw, buffer, relay) {
   } catch (e) {
     return raw;
   }
-  if (!locations.length) return raw;
 
   let changed = false;
-  for (const loc of locations) {
+
+  for (const loc of locations || []) {
     const original = loc.get();
-    const restored = buffer.push(original);
-    if (restored !== original) changed = true;
-    loc.set(restored);
+    if (typeof original !== 'string') continue;
+
+    let result;
+    if (loc.mode === 'append' && loc.key) {
+      if (!buffers.has(loc.key)) {
+        buffers.set(loc.key, {
+          buf: makeBuffer(loc.counts !== false),
+          pointer: loc.pointer,
+          encode: encoderFor(loc.key),
+        });
+      }
+      const record = buffers.get(loc.key);
+      // Keep the most recent pointer: the first delta of a turn arrives
+      // nested under /message/metadata, later ones at the field's own path,
+      // and a tail must be emitted against a path the page will apply.
+      if (loc.pointer) record.pointer = loc.pointer;
+      result = record.buf.push(original);
+    } else {
+      result = restoreWhole(original, loc.counts !== false);
+    }
+
+    if (result !== original) {
+      loc.set(result);
+      changed = true;
+    }
+  }
+
+  // Release any withheld tail on the frame that closes the turn.
+  if (Array.isArray(parsed.v) && isTurnTerminal(parsed.v)) {
+    for (const [key, record] of buffers) {
+      const tail = record.buf.flush();
+      if (!tail || !record.pointer) continue;
+      parsed.v.push({ p: record.pointer, o: 'append', v: record.encode(tail) });
+      changed = true;
+      if (relay) relay('restoration-tail', { key, length: tail.length, emitted: true });
+    }
   }
 
   if (!changed) return raw;
 
   try {
-    return 'data: ' + JSON.stringify(parsed);
+    lines[dataIdx] = `data: ${JSON.stringify(parsed)}`;
+    return lines.join('\n');
   } catch (e) {
     return raw; // fail open rather than emit a malformed frame
   }
@@ -133,20 +209,66 @@ function restoreFrame(raw, buffer, relay) {
  * @param {(token: string) => void} [opts.onRestored]
  */
 function createRestorationTransform({ getMap, relay, tolerant = false, onRestored }) {
-  // Distinct markers actually restored in this response. Counted here
-  // rather than by the caller so the completion event carries a number the
-  // interface can show without the caller having to track it. Tokens only,
-  // never values -- this count crosses the page-readable channel.
+  // Distinct markers the MODEL actually gave back. Counted here rather than
+  // by the caller so the completion event carries a number the interface can
+  // show directly. Tokens only, never values -- this crosses the
+  // page-readable channel.
+  //
+  // Only locations flagged countable contribute. The echoed prompt and any
+  // deep-walk fallback restore normally but do not count, because both
+  // contain our markers by construction and would report perfect round-trip
+  // fidelity on every turn regardless of what the model did.
   const restored = new Set();
   const countAndForward = (token) => {
     restored.add(token);
     if (onRestored) onRestored(token);
   };
 
-  const buffer = createDetokenizeBuffer({ getMap, tolerant, onRestored: countAndForward });
+  const buffers = new Map();
+  const makeBuffer = (counts) => createDetokenizeBuffer({
+    getMap, tolerant, onRestored: counts ? countAndForward : undefined,
+  });
+  const restoreWhole = (text, counts) => restoreAll(text, {
+    getMap, tolerant, onRestored: counts ? countAndForward : undefined,
+  });
+
   const assembler = createFrameAssembler();
+  const encoder = new TextEncoder();
   let framesSeen = 0;
   let chunkCount = 0;
+  let completeRelayed = false;
+
+  /**
+   * "sent" is how many markers the session holds, so sent - restored is how
+   * many the model did not give back. That difference is the number the
+   * interface must surface honestly: a reply missing a placeholder is
+   * incomplete, and the user is entitled to know rather than be shown a
+   * plausible-looking answer with a value silently absent.
+   *
+   * Relayed exactly once. An earlier revision fired it both on seeing
+   * [DONE] and again from flush(), so every turn reported twice and the
+   * interface recorded the same reply as two.
+   *
+   * The guard below is regression insurance, not live logic: the two
+   * remaining call sites are flush() and cancel(), which the Streams
+   * Standard makes mutually exclusive -- a cancelled stream is not
+   * flushed, and a closed one cannot be cancelled. It stays because the
+   * defect it prevents was introduced by adding a call site, and a third
+   * one would reintroduce it silently. Deliberately not test-covered,
+   * since no reachable path reaches it twice.
+   */
+  function relayComplete() {
+    if (completeRelayed || !relay) return;
+    completeRelayed = true;
+    const sent = Object.keys(getMap() || {}).length;
+    relay('restoration-complete', {
+      framesSeen,
+      restored: restored.size,
+      sent,
+      unreturned: Math.max(0, sent - restored.size),
+      restoredTokens: Array.from(restored),
+    });
+  }
 
   return new TransformStream({
     transform(chunk, controller) {
@@ -161,14 +283,16 @@ function createRestorationTransform({ getMap, relay, tolerant = false, onRestore
           // has stopped working. Shape only -- no reply text.
           relay('stream-chunk-shape', {
             chunkCount,
-            bytes: chunk.length,
+            // Decoded text by this point, so .length would be characters.
+            // The field is named bytes, so it reports bytes.
+            bytes: encoder.encode(chunk).length,
             looksLikeSse: /^(?:data|event):/m.test(chunk),
             frameDelimiters: (chunk.match(/\n\n/g) || []).length,
           });
         }
         for (const frame of assembler.push(chunk)) {
           framesSeen++;
-          const out = restoreFrame(frame.raw, buffer, relay);
+          const out = restoreFrame(frame.raw, buffers, makeBuffer, restoreWhole, relay);
           controller.enqueue(frame.terminated ? out + FRAME_DELIMITER : out);
         }
       } catch (e) {
@@ -176,33 +300,38 @@ function createRestorationTransform({ getMap, relay, tolerant = false, onRestore
         controller.enqueue(chunk); // fail open
       }
     },
+    cancel() {
+      // The user pressed stop, or the page dropped the stream. Report what
+      // was restored before that happened; flush() does not run on cancel.
+      relayComplete();
+    },
     flush(controller) {
       try {
         for (const frame of assembler.flush()) {
           framesSeen++;
-          controller.enqueue(restoreFrame(frame.raw, buffer, relay));
+          controller.enqueue(restoreFrame(frame.raw, buffers, makeBuffer, restoreWhole, relay));
         }
-        // Anything still withheld by the hold-back buffer. Emitted raw: an
-        // incomplete marker shown to the user is bad, silently dropping
-        // text is worse.
-        const tail = buffer.flush();
-        if (tail) controller.enqueue(tail);
-        if (relay) {
-          // "sent" is how many markers the session holds in total, so
-          // sent - restored is how many the model did not give back. That
-          // difference is the number the interface must surface honestly:
-          // a reply missing a placeholder is incomplete, and the user is
-          // entitled to know rather than be shown a plausible-looking
-          // answer with a value silently absent.
-          const sent = Object.keys(getMap() || {}).length;
-          relay('restoration-complete', {
-            framesSeen,
-            restored: restored.size,
-            sent,
-            unreturned: Math.max(0, sent - restored.size),
-            restoredTokens: Array.from(restored),
-          });
+
+        // Normally empty: the terminal frame already released every tail. A
+        // reply that ended without one still must not lose characters, and
+        // must not have bare text spliced into the byte stream either, so
+        // what remains is emitted as a well-formed frame of its own.
+        for (const [key, record] of buffers) {
+          const tail = record.buf.flush();
+          if (!tail) continue;
+          if (record.pointer) {
+            const op = { p: record.pointer, o: 'append', v: record.encode(tail) };
+            controller.enqueue(`data: ${JSON.stringify({ v: [op] })}${FRAME_DELIMITER}`);
+            if (relay) relay('restoration-tail', { key, length: tail.length, emitted: true });
+          } else if (relay) {
+            // No pointer to attach it to. Dropped deliberately: a line that
+            // belongs to no data: frame is malformed SSE and risks the whole
+            // reply, which is worse than losing a partial marker.
+            relay('restoration-tail', { key, length: tail.length, emitted: false });
+          }
         }
+
+        relayComplete();
       } catch (e) {
         if (relay) relay('error', { where: 'restoration flush', message: String(e) });
       }
@@ -228,10 +357,14 @@ function withRestoredBody(response, opts) {
       .pipeThrough(createRestorationTransform(opts))
       .pipeThrough(new TextEncoderStream());
 
+    const headers = new Headers(response.headers);
+    headers.delete('content-length');
+    headers.delete('content-encoding');
+
     return new Response(stream, {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers,
+      headers,
     });
   } catch (e) {
     if (opts && opts.relay) {
@@ -246,5 +379,6 @@ module.exports = {
   withRestoredBody,
   createFrameAssembler,
   restoreFrame,
+  isTurnTerminal,
   FRAME_DELIMITER,
 };

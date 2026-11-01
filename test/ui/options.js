@@ -159,11 +159,25 @@ function renderRow(token, value, status = 'pending') {
   return tr;
 }
 
+/**
+ * Guards against overlapping renders.
+ *
+ * loadVault() is triggered from several places at once -- init, the tab
+ * picker, the presentation-mode switch, and a storage listener that fires
+ * on every counter write during a streaming reply. Each call used to clear
+ * the table and then append rows AFTER awaiting the worker, so two calls
+ * in flight together both cleared, both waited, and then both appended:
+ * three stored values rendered as six rows, and during a reply it kept
+ * growing. Only the most recent render is allowed to touch the DOM.
+ */
+let vaultRender = 0;
+
 async function loadVault() {
+  const mine = ++vaultRender;
   const body = $('vaultBody');
-  body.textContent = '';
 
   if (currentTabId === null) {
+    body.textContent = '';
     $('vaultTable').hidden = true;
     $('vaultEmpty').hidden = false;
     $('vaultEmpty').textContent = 'No supported tab is open.';
@@ -175,6 +189,10 @@ async function loadVault() {
     send({ source: 'pii-redact', kind: 'vault-read', tabId: currentTabId }),
     send({ source: 'pii-redact', kind: 'ui-stats', tabId: currentTabId }),
   ]);
+
+  // A newer render started while this one was waiting; leave the DOM to it.
+  if (mine !== vaultRender) return;
+  body.textContent = '';
 
   if (!reply || !reply.ok) {
     $('vaultTable').hidden = true;
@@ -198,16 +216,23 @@ async function loadVault() {
 
   const stats = statsReply?.stats || {};
   const restoredSet = new Set(stats.restoredTokens || []);
+  // Named by the worker at the moment a reply finished. Only a token in
+  // this set is known to have been dropped; anything in neither set is
+  // simply waiting for its turn to stream, and reporting that as a failure
+  // would state a result nothing measured.
+  const missingSet = new Set(stats.unreturnedTokens || []);
 
   for (const [token, value] of entries) {
-    const status = restoredSet.has(token)
-      ? 'restored'
-      : (stats.unreturned > 0 ? 'unreturned' : 'pending');
+    let status = 'pending';
+    if (restoredSet.has(token)) status = 'restored';
+    else if (missingSet.has(token)) status = 'unreturned';
     body.appendChild(renderRow(token, value, status));
   }
   $('vaultTable').hidden = false;
   $('vaultEmpty').hidden = true;
 }
+
+let pickerListenerAdded = false;
 
 async function populateTabs() {
   const tabs = await chrome.tabs.query({
@@ -222,7 +247,15 @@ async function populateTabs() {
     picker.appendChild(opt);
     picker.disabled = true;
     currentTabId = null;
+    loadVault();
     return;
+  }
+
+  // Preserve user-selected tab if still open, otherwise pick active tab, else first tab
+  const stillValid = tabs.some((t) => t.id === currentTabId);
+  if (!stillValid) {
+    const activeTab = tabs.find((t) => t.active);
+    currentTabId = activeTab ? activeTab.id : tabs[0].id;
   }
 
   for (const t of tabs) {
@@ -230,15 +263,22 @@ async function populateTabs() {
     opt.value = String(t.id);
     let host = t.url;
     try { host = new URL(t.url).host; } catch (e) { /* keep raw */ }
-    opt.textContent = `${host} · tab ${t.id}`;
+    opt.textContent = `${host} · tab ${t.id}${t.active ? ' (active)' : ''}`;
+    if (t.id === currentTabId) opt.selected = true;
     picker.appendChild(opt);
   }
   picker.disabled = false;
-  currentTabId = tabs[0].id;
-  picker.addEventListener('change', () => {
-    currentTabId = Number(picker.value);
-    loadVault();
-  });
+  picker.value = String(currentTabId);
+
+  if (!pickerListenerAdded) {
+    pickerListenerAdded = true;
+    picker.addEventListener('change', () => {
+      currentTabId = Number(picker.value);
+      loadVault();
+    });
+  }
+
+  loadVault();
 }
 
 /* ------------------------------------------------------------ settings -- */
@@ -410,14 +450,21 @@ async function main() {
   loadMetrics();
 
   // Keep tab list and vault synchronized with browser activity
+  // Both of these fire in bursts -- tab events on every title and favicon
+  // change, storage events on every counter write while a reply streams.
+  // Coalesced so a burst produces one refresh instead of dozens.
+  let refreshTimer = null;
+  const refreshSoon = (fn) => {
+    if (refreshTimer !== null) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => { refreshTimer = null; fn(); }, 200);
+  };
+
   if (chrome.tabs && chrome.tabs.onUpdated) {
-    chrome.tabs.onUpdated.addListener(() => populateTabs());
-    chrome.tabs.onRemoved.addListener(() => populateTabs());
+    chrome.tabs.onUpdated.addListener(() => refreshSoon(populateTabs));
+    chrome.tabs.onRemoved.addListener(() => refreshSoon(populateTabs));
   }
   if (chrome.storage && chrome.storage.session) {
-    chrome.storage.session.onChanged.addListener(() => {
-      loadVault();
-    });
+    chrome.storage.session.onChanged.addListener(() => refreshSoon(loadVault));
   }
 }
 

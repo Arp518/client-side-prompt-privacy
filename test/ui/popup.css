@@ -209,3 +209,8 @@ h2 {
   padding: 10px 14px;
   background: var(--bg-raised);
 }
+
+/* ---- pause control ---- */
+.pause-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.pause-title{font-weight:600;margin-bottom:2px}
+.note.warn{border-color:#b45309;background:rgba(180,83,9,.08)}

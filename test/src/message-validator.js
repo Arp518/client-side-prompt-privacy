@@ -34,6 +34,8 @@ const ALLOWED_KINDS = new Set([
   'possible-rejection',
   'stream-chunk-shape',
   'restoration-complete',
+  'restoration-tail',
+  'send-paused',
   'stream-complete',
   'vault-channel-open',
   'unintercepted-transport',
@@ -83,8 +85,19 @@ const KIND_VALIDATORS = {
     (p?.restoredTokens === undefined ||
       (Array.isArray(p.restoredTokens) &&
         p.restoredTokens.every((t) => typeof t === 'string' && /^\[[A-Z0-9_]+\]$/.test(t)))),
+  // Diagnostic for text a hold-back buffer was still withholding when the
+  // turn ended, and whether it could be re-emitted as a well-formed frame.
+  // A length, never the text itself.
+  'restoration-tail': (p) =>
+    typeof p?.key === 'string' &&
+    typeof p?.length === 'number' &&
+    typeof p?.emitted === 'boolean',
   'stream-complete': (p) =>
     typeof p?.chunkCount === 'number' && typeof p?.totalBytesApprox === 'number',
+  // Masking was switched off for this tab, so the request went out as the
+  // user typed it. No payload: the event is the whole of the information,
+  // and a request we deliberately did not touch is one we must not describe.
+  'send-paused': (p) => typeof p === 'object' && p !== null,
   'vault-channel-open': (p) => typeof p === 'object' && p !== null,
   'unintercepted-transport': (p) => typeof p?.transport === 'string',
 };

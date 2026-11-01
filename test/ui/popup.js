@@ -16,6 +16,14 @@ const SUPPORTED = /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//;
 
 const $ = (id) => document.getElementById(id);
 
+/**
+ * Whether masking is off for this tab. Held here because the status line
+ * is written from two places -- the counters and the pause control -- and
+ * whichever ran last used to win. A refreshed counter could therefore
+ * repaint the header as "Active" on a tab where masking was switched off.
+ */
+let paused = false;
+
 function send(message) {
   return new Promise((resolve) => {
     try {
@@ -27,6 +35,21 @@ function send(message) {
       resolve(null);
     }
   });
+}
+
+function renderStatus() {
+  $('dot').classList.toggle('on', !paused);
+  $('statusText').textContent = paused ? 'Paused' : 'Active';
+}
+
+function renderPause() {
+  renderStatus();
+  $('pausedBanner').hidden = !paused;
+  $('pauseBtn').textContent = paused ? 'Resume masking' : 'Pause for this tab';
+  $('pauseBtn').setAttribute('aria-pressed', String(paused));
+  $('pauseHint').textContent = paused
+    ? 'Off. Prompts leave the browser exactly as typed.'
+    : 'On. Detected values are replaced before the request is sent.';
 }
 
 function renderTypes(byType) {
@@ -66,7 +89,9 @@ function renderTypes(byType) {
 }
 
 async function renderRestoration(stats, tabId) {
-  const { restored = 0, unreturned = 0, restoredTokens = [] } = stats;
+  const {
+    restored = 0, unreturned = 0, restoredTokens = [], unreturnedTokens,
+  } = stats;
   const total = restored + unreturned;
 
   $('restored').textContent = String(restored);
@@ -95,20 +120,33 @@ async function renderRestoration(stats, tabId) {
 
     const list = $('unreturnedList');
     list.textContent = '';
-    if (tabId) {
-      // Names only. This popup has no use for a stored value, so it does
-      // not ask for one -- see the note at the top of this file.
+
+    // The worker names these at the moment a reply finished, so the list
+    // holds exactly the markers that reply failed to return.
+    //
+    // It used to be derived here instead, by subtracting the restored set
+    // from the whole vault. That silently included markers minted for a
+    // LATER turn whose reply had not streamed yet, so the panel listed
+    // three placeholders under a heading reading "1 placeholder was not
+    // returned" -- contradicting itself, and accusing the model of
+    // dropping values it had not been asked for.
+    let dropped = Array.isArray(unreturnedTokens) ? unreturnedTokens : null;
+
+    if (!dropped && tabId) {
+      // Older stored stats predate that set. Names only: this popup has no
+      // use for a value, so it does not ask for one.
       const v = await send({ source: 'pii-redact', kind: 'vault-tokens', tabId });
       if (v && v.ok && Array.isArray(v.tokens)) {
-        const restoredSet = new Set(restoredTokens);
-        const dropped = v.tokens.filter((t) => !restoredSet.has(t));
-        for (const token of dropped) {
-          const tag = document.createElement('span');
-          tag.className = 'unreturned-tag';
-          tag.textContent = token;
-          list.appendChild(tag);
-        }
+        const back = new Set(restoredTokens);
+        dropped = v.tokens.filter((t) => !back.has(t));
       }
+    }
+
+    for (const token of dropped || []) {
+      const tag = document.createElement('span');
+      tag.className = 'unreturned-tag';
+      tag.textContent = token;
+      list.appendChild(tag);
     }
   } else {
     $('unreturnedPane').hidden = true;
@@ -116,8 +154,7 @@ async function renderRestoration(stats, tabId) {
 }
 
 async function applyStats(stats, tabId) {
-  $('dot').classList.add('on');
-  $('statusText').textContent = 'Active';
+  renderStatus();
   $('substituted').textContent = String(stats.substituted || 0);
   await renderRestoration(stats, tabId);
   if (renderTypes(stats.byType)) {
@@ -169,6 +206,31 @@ async function main() {
       }
     });
   }
+
+  // Read the real setting rather than assuming; a popup that showed
+  // "Active" on a paused tab would assert protection that is switched off.
+  const p = await send({ source: 'pii-redact', kind: 'get-pause', tabId: tab.id });
+  paused = !!(p && p.ok && p.paused);
+  renderPause();
+
+  $('pauseBtn').addEventListener('click', async () => {
+    $('pauseBtn').disabled = true;
+    const next = !paused;
+    const done = await send({
+      source: 'pii-redact', kind: 'set-pause', tabId: tab.id, paused: next,
+    });
+    $('pauseBtn').disabled = false;
+    if (done && done.ok) {
+      paused = done.paused === true;
+      renderPause();
+    } else {
+      // Never leave the control looking as though it took effect. The user
+      // would carry on typing in the belief that masking is off (or on)
+      // when the opposite is true.
+      $('pauseHint').textContent =
+        'Could not change this setting: the background worker did not respond.';
+    }
+  });
 
   $('clearBtn').addEventListener('click', async () => {
     const done = await send({ source: 'pii-redact', kind: 'vault-clear', tabId: tab.id });

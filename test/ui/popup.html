@@ -27,6 +27,31 @@
 
 <div id="activePanes" hidden>
 
+  <!--
+    Shown only while masking is off. Deliberately loud: every other panel
+    in this popup describes protection that is currently applied, and the
+    one state the user must never mistake is the state where it is not.
+  -->
+  <section class="pane" id="pausedBanner" hidden>
+    <div class="note warn">
+      <div class="note-title">Masking is paused for this tab</div>
+      <p>
+        Prompts are being sent exactly as you type them. Nothing is being
+        detected or replaced.
+      </p>
+    </div>
+  </section>
+
+  <section class="pane">
+    <div class="pause-row">
+      <div>
+        <div class="pause-title">Masking</div>
+        <div class="muted small" id="pauseHint">…</div>
+      </div>
+      <button class="btn" id="pauseBtn" aria-pressed="false">Pause</button>
+    </div>
+  </section>
+
   <section class="pane">
     <h2>This conversation</h2>
     <div class="grid">

@@ -133,4 +133,33 @@ function createDetokenizeBuffer({ getMap, tolerant = false, onRestored }) {
   };
 }
 
-module.exports = { createDetokenizeBuffer, VIABLE_PREFIX, MAX_HOLD };
+/**
+ * Restore a string that arrives WHOLE, with no carry-forward.
+ *
+ * Needed because not every text field in a stream frame is a delta. ChatGPT
+ * sends `model_dil_v2.constants` cumulatively -- each frame carries the
+ * entire reply so far -- and it echoes the user's own prompt back in one
+ * piece. Feeding either through the hold-back buffer is actively wrong: the
+ * buffer withholds a trailing partial marker from frame n and prepends it to
+ * frame n+1, which for a cumulative field splices a stray fragment onto the
+ * front of the whole string. That produced a visible
+ * "[PHONEI will email ..." in the reply.
+ *
+ * A whole value needs none of that machinery. Any trailing partial marker is
+ * superseded by the next frame's copy, so it is left exactly as it arrived.
+ */
+function restoreAll(text, { getMap, tolerant = false, onRestored }) {
+  if (typeof text !== 'string' || text === '') return text;
+  const map = getMap() || {};
+  if (onRestored) {
+    const seen = text.match(TOKEN_RE);
+    if (seen) {
+      for (const token of seen) {
+        if (Object.prototype.hasOwnProperty.call(map, token)) onRestored(token);
+      }
+    }
+  }
+  return detokenize(text, map, { tolerant });
+}
+
+module.exports = { createDetokenizeBuffer, restoreAll, VIABLE_PREFIX, MAX_HOLD };
